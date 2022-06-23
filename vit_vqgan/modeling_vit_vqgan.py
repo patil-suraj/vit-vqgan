@@ -192,7 +192,6 @@ class VitDecoder(nn.Module):
             self.num_patches, self.config.hidden_size, embedding_init=jax.nn.initializers.normal()
         )
         self.transformer = Transformer(self.config, dtype=self.dtype)
-        self.feed_forward_layer = FeedForwardLayer(self.config, dtype=self.dtype)
 
         self.to_image = nn.ConvTranspose(
             self.config.num_channels,
@@ -207,7 +206,6 @@ class VitDecoder(nn.Module):
     def __call__(self, hidden_states, deterministic: bool = True):
         hidden_states = hidden_states + self.position_embeddings(self.position_ids)
         hidden_states = self.transformer(hidden_states, deterministic=deterministic)
-        hidden_states = self.feed_forward_layer(hidden_states)
 
         batch, _, channels = hidden_states.shape
         hidden_states = hidden_states.reshape(batch, self.latent_size, self.latent_size, channels)
