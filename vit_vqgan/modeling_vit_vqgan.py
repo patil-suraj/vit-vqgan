@@ -235,7 +235,6 @@ class VectorQuantizer(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        # TODO: add l2 normalization as in section 3.2 of https://arxiv.org/abs/2110.04627
         self.embedding = nn.Embed(self.config.n_embed, self.config.codebook_embed_dim, dtype=self.dtype)  # TODO: init
 
     def __call__(self, hidden_states):
@@ -256,6 +255,11 @@ class VectorQuantizer(nn.Module):
 
         # distances from z to embeddings e_j (z - e)^2 = z^2 + e^2 - 2 e * z
         emb_weights = self.variables["params"]["embedding"]["embedding"]
+
+        # normalize `z` here `hidden_states` and codebook latent variable `e` (here `emb_weights`)
+        hidden_states_flattended = jnp.linalg.norm(hidden_states_flattended, axis=1, keepdims=True)
+        emb_weights = jnp.linalg.norm(emb_weights, axis=1, keepdims=True)
+
         distance = (
             jnp.sum(hidden_states_flattended**2, axis=1, keepdims=True)
             + jnp.sum(emb_weights**2, axis=1)
@@ -265,6 +269,8 @@ class VectorQuantizer(nn.Module):
         # get quantized latent vectors
         min_encoding_indices = jnp.argmin(distance, axis=1)
         z_q = self.embedding(min_encoding_indices).reshape(hidden_states.shape)
+        # normalize latent variable (Ze(x) in the paper)
+        z_q = jnp.linalg.norm(z_q, axis=2, keepdims=True)
 
         # reshape to (batch, num_tokens)
         min_encoding_indices = min_encoding_indices.reshape(hidden_states.shape[0], -1)
