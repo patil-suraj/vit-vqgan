@@ -6,11 +6,27 @@ import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 from flax.linen.attention import dot_product_attention_weights
+from flax.linen.initializers import variance_scaling
 from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel
 
 from .configuration_vit_vqgan import ViTVQGANConfig
 
 ACT2FN["tanh"] = nn.tanh
+
+# copied from https://github.com/deepmind/dm-haiku/blob/3f31e279d4ce613ae3e47b97031f8b2d732071b7/haiku/_src/spectral_norm.py#L46
+def l2_normalize(x, axis=None, eps=1e-12):
+    """Normalizes along dimension `axis` using an L2 norm.
+    This specialized function exists for numerical stability reasons.
+    Args:
+      x: An input ndarray.
+      axis: Dimension along which to normalize, e.g. `1` to separately normalize
+        vectors in a batch. Passing `None` views `t` as a flattened vector when
+        calculating the norm (equivalent to Frobenius norm).
+      eps: Epsilon to avoid dividing by zero.
+    Returns:
+      An array of the same shape as 'x' L2-normalized along 'axis'.
+    """
+    return x * jax.lax.rsqrt((x * x).sum(axis=axis, keepdims=True) + eps)
 
 
 class VisionEmbeddings(nn.Module):
@@ -235,7 +251,11 @@ class VectorQuantizer(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        self.embedding = nn.Embed(self.config.n_embed, self.config.codebook_embed_dim, dtype=self.dtype)  # TODO: init
+        embed_init = variance_scaling(1.0, "fan_in", "normal", out_axis=0)
+        self.embedding = self.param(
+            "embedding", embed_init, (self.config.n_embed, self.config.codebook_embed_dim), self.dtype
+        )
+        self.beta = 0.25  # TODO: make this is a config or trainable parameter
 
     def __call__(self, hidden_states):
         """
@@ -250,42 +270,40 @@ class VectorQuantizer(nn.Module):
         #  flatten
         hidden_states_flattended = hidden_states.reshape((-1, self.config.codebook_embed_dim))
 
-        # dummy op to init the weights, so we can access them below
-        self.embedding(jnp.ones((1, 1), dtype="i4"))
+        # normalize `z` here `hidden_states` and codebook latent variable `e` (here `embedding`)
+        hidden_states_flattended = l2_normalize(hidden_states_flattended, axis=1)
+        embedding = l2_normalize(self.embedding, axis=1)
 
         # distances from z to embeddings e_j (z - e)^2 = z^2 + e^2 - 2 e * z
-        emb_weights = self.variables["params"]["embedding"]["embedding"]
-
-        # normalize `z` here `hidden_states` and codebook latent variable `e` (here `emb_weights`)
-        hidden_states_flattended = jnp.linalg.norm(hidden_states_flattended, axis=1, keepdims=True)
-        emb_weights = jnp.linalg.norm(emb_weights, axis=1, keepdims=True)
-
         distance = (
             jnp.sum(hidden_states_flattended**2, axis=1, keepdims=True)
-            + jnp.sum(emb_weights**2, axis=1)
-            - 2 * jnp.dot(hidden_states_flattended, emb_weights.T)
+            + jnp.sum(embedding**2, axis=1)
+            - 2 * jnp.dot(hidden_states_flattended, embedding.T)
         )
 
         # get quantized latent vectors
         min_encoding_indices = jnp.argmin(distance, axis=1)
-        z_q = self.embedding(min_encoding_indices).reshape(hidden_states.shape)
-        # normalize latent variable (Ze(x) in the paper)
-        z_q = jnp.linalg.norm(z_q, axis=2, keepdims=True)
-
         # reshape to (batch, num_tokens)
         min_encoding_indices = min_encoding_indices.reshape(hidden_states.shape[0], -1)
+        # z_q = self.embedding(min_encoding_indices).reshape(hidden_states.shape)
+        z_q = self.get_codebook_entry(min_encoding_indices)
 
-        # compute the codebook_loss (q_loss) outside the model
-        # here we return the embeddings and indices
-        return z_q, min_encoding_indices
+        hidden_states_normed = l2_normalize(hidden_states, axis=-1)
+        e_latent_loss = jnp.mean(jnp.square(jax.lax.stop_gradient(z_q) - hidden_states_normed))
+        q_latent_loss = jnp.mean(jnp.square(z_q - jax.lax.stop_gradient(hidden_states_normed)))
+        loss = q_latent_loss + self.beta * e_latent_loss
+
+        # Straight Through Estimator
+        z_q = hidden_states + jax.lax.stop_gradient(z_q - hidden_states)
+
+        return z_q, min_encoding_indices, loss
 
     def get_codebook_entry(self, indices, shape=None):
         # indices are expected to be of shape (batch, num_tokens)
         # get quantized latent vectors
-        batch, num_tokens = indices.shape
-        z_q = self.embedding(indices)
-        z_q = z_q.reshape(batch, int(math.sqrt(num_tokens)), int(math.sqrt(num_tokens)), -1)
-        z_q = jnp.linalg.norm(z_q, axis=2, keepdims=True)
+        z_q = jnp.take(self.embedding, indices, axis=0)
+        # normalize latent variable (Ze(x) in the paper)
+        z_q = l2_normalize(z_q, axis=-1)
         return z_q
 
 
@@ -307,7 +325,7 @@ class VitVQModule(nn.Module):
     def encode(self, pixel_values, deterministic: bool = True):
         hidden_states = self.encoder(pixel_values, deterministic=deterministic)
         hidden_states = self.factor_in(hidden_states)
-        quant_states, indices = self.quantize(hidden_states)
+        quant_states, indices, _ = self.quantize(hidden_states)
         return quant_states, indices
 
     def decode(self, hidden_states, deterministic: bool = True):
@@ -326,12 +344,12 @@ class VitVQModule(nn.Module):
         # 2. Project the embeddings to the codebook embedding space and quantize
         # this corresponds to the factorized codebook from the paper https://arxiv.org/abs/2110.04627 section 3.2
         hidden_states = self.factor_in(hidden_states)
-        hidden_states, _ = self.quantizer(hidden_states)
+        hidden_states, _, loss = self.quantizer(hidden_states)
         # 3. Project the quantized embeddings back to the original space
         hidden_states = self.factor_out(hidden_states)
         # 4. Decode the quantized embeddings back into the pixel space
         pixel_values = self.decoder(hidden_states, deterministic=deterministic)
-        return pixel_values
+        return pixel_values, loss
 
 
 class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):
