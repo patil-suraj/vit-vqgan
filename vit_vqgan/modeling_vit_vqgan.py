@@ -89,11 +89,7 @@ class Attention(nn.Module):
     def _merge_heads(self, hidden_states):
         return hidden_states.reshape(hidden_states.shape[:2] + (self.embed_dim,))
 
-    def __call__(
-        self,
-        hidden_states,
-        deterministic: bool = True,
-    ):
+    def __call__(self, hidden_states, deterministic: bool = True):
         query = self.q_proj(hidden_states)
         key = self.k_proj(hidden_states)
         value = self.v_proj(hidden_states)
@@ -135,18 +131,11 @@ class TransformerBlock(nn.Module):
         self.mlp = FeedForwardLayer(self.config, dtype=self.dtype)
         self.layer_norm2 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
 
-    def __call__(
-        self,
-        hidden_states,
-        deterministic: bool = True,
-    ):
+    def __call__(self, hidden_states, deterministic: bool = True):
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            deterministic=deterministic,
-        )
+        hidden_states = self.self_attn(hidden_states=hidden_states, deterministic=deterministic)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -168,11 +157,7 @@ class Transformer(nn.Module):
         ]
         self.feed_forward_layer = FeedForwardLayer(self.config, dtype=self.dtype)
 
-    def __call__(
-        self,
-        hidden_states,
-        deterministic: bool = True,
-    ):
+    def __call__(self, hidden_states, deterministic: bool = True):
         for layer in self.layers:
             hidden_states = layer(hidden_states, deterministic=deterministic)
         
@@ -189,11 +174,7 @@ class VitEncoder(nn.Module):
         self.embeddings = VisionEmbeddings(self.config, dtype=self.dtype)
         self.transformer = Transformer(self.config, dtype=self.dtype)
 
-    def __call__(
-        self,
-        pixel_values,
-        deterministic: bool = True,
-    ):
+    def __call__(self, pixel_values, deterministic: bool = True):
         hidden_states = self.embeddings(pixel_values)
         hidden_states = self.transformer(hidden_states, deterministic=deterministic)
         return hidden_states
@@ -222,11 +203,7 @@ class VitDecoder(nn.Module):
             kernel_init=jax.nn.initializers.normal(),
         )
     
-    def __call__(
-        self,
-        hidden_states,
-        deterministic: bool = True,
-    ):
+    def __call__(self, hidden_states, deterministic: bool = True):
         hidden_states = hidden_states + self.position_embeddings(self.position_ids)
         hidden_states = self.transformer(hidden_states, deterministic=deterministic)
         hidden_states = self.feed_forward_layer(hidden_states)
@@ -330,11 +307,7 @@ class VitVQModule(nn.Module):
         hidden_states = self.decode(hidden_states)
         return hidden_states
 
-    def __call__(
-        self,
-        pixel_values,
-        deterministic: bool = True,
-    ):
+    def __call__(self, pixel_values, deterministic: bool = True):
         hidden_states = self.encoder(pixel_values, deterministic=deterministic)
         hidden_states = self.factor_in(hidden_states)
         hidden_states, _ = self.quantizer(hidden_states)
