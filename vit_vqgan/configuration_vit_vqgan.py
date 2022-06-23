@@ -13,7 +13,8 @@ class ViTVQGANConfig(PretrainedConfig):
         image_size=256,
         num_channels=3,
         patch_size=8,
-        hidden_act="tanh",
+        hidden_act="relu",
+        extra_feed_forward_act="tanh",
         layer_norm_eps=0.00001,
         dropout=0.0,
         attention_dropout=0.0,
@@ -38,3 +39,4 @@ class ViTVQGANConfig(PretrainedConfig):
         self.attention_dropout = attention_dropout
         self.layer_norm_eps = layer_norm_eps
         self.hidden_act = hidden_act
+        self.extra_feed_forward_act = extra_feed_forward_act

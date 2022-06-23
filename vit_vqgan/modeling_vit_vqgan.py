@@ -6,10 +6,12 @@ import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 from flax.linen.attention import dot_product_attention_weights
-from transformers.modeling_flax_utils import FlaxPreTrainedModel
+from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel
 
 from .configuration_vit_vqgan import ViTVQGANConfig
 
+
+ACT2FN["tanh"] = nn.tanh
 
 class VisionEmbeddings(nn.Module):
     config: ViTVQGANConfig
@@ -45,10 +47,11 @@ class VisionEmbeddings(nn.Module):
 
 class FeedForwardLayer(nn.Module):
     config: ViTVQGANConfig
+    activation: str = "relu"
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        self.activation_fn = nn.tanh
+        self.activation_fn = ACT2FN[self.activation]
         self.fc1 = nn.Dense(
             self.config.intermediate_size,
             dtype=self.dtype,
@@ -126,7 +129,7 @@ class TransformerBlock(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        self.self_attn = Attention(self.config, dtype=self.dtype)
+        self.self_attn = Attention(self.config, activation=self.config.hidden_act, dtype=self.dtype)
         self.layer_norm1 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
         self.feed_forward = FeedForwardLayer(self.config, dtype=self.dtype)
         self.layer_norm2 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
@@ -154,7 +157,7 @@ class Transformer(nn.Module):
         self.layers = [
             TransformerBlock(self.config, name=str(i), dtype=self.dtype) for i in range(self.config.num_hidden_layers)
         ]
-        self.feed_forward = FeedForwardLayer(self.config, dtype=self.dtype)
+        self.feed_forward = FeedForwardLayer(self.config, activation=self.config.extra_feed_forward_act, dtype=self.dtype)
 
     def __call__(self, hidden_states, deterministic: bool = True):
         for layer in self.layers:
