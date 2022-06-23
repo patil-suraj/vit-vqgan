@@ -235,6 +235,7 @@ class VectorQuantizer(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
+        # TODO: add l2 normalization as in section 3.2 of https://arxiv.org/abs/2110.04627
         self.embedding = nn.Embed(self.config.n_embed, self.config.codebook_embed_dim, dtype=self.dtype)  # TODO: init
 
     def __call__(self, hidden_states):
@@ -304,21 +305,26 @@ class VitVQModule(nn.Module):
 
     def decode(self, hidden_states, deterministic: bool = True):
         hidden_states = self.factor_out(hidden_states)
-        hidden_states = self.decoder(hidden_states, deterministic=deterministic)
-        return hidden_states
+        pixel_values = self.decoder(hidden_states, deterministic=deterministic)
+        return pixel_values
 
     def decode_code(self, code_b):
         hidden_states = self.quantize.get_codebook_entry(code_b)
-        hidden_states = self.decode(hidden_states)
-        return hidden_states
+        pixel_values = self.decode(hidden_states)
+        return pixel_values
 
     def __call__(self, pixel_values, deterministic: bool = True):
+        # 1. create patches and encode
         hidden_states = self.encoder(pixel_values, deterministic=deterministic)
+        # 2. Project the embeddings to the codebook embedding space and quantize
+        # this corresponds to the factorized codebook from the paper https://arxiv.org/abs/2110.04627 section 3.2
         hidden_states = self.factor_in(hidden_states)
         hidden_states, _ = self.quantizer(hidden_states)
+        # 3. Project the quantized embeddings back to the original space
         hidden_states = self.factor_out(hidden_states)
-        hidden_states = self.decoder(hidden_states, deterministic=deterministic)
-        return hidden_states
+        # 4. Decode the quantized embeddings back into the pixel space
+        pixel_values = self.decoder(hidden_states, deterministic=deterministic)
+        return pixel_values
 
 
 class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):
