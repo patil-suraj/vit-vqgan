@@ -285,6 +285,7 @@ class VectorQuantizer(nn.Module):
         batch, num_tokens = indices.shape
         z_q = self.embedding(indices)
         z_q = z_q.reshape(batch, int(math.sqrt(num_tokens)), int(math.sqrt(num_tokens)), -1)
+        z_q = jnp.linalg.norm(z_q, axis=2, keepdims=True)
         return z_q
 
 
