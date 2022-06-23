@@ -128,7 +128,7 @@ class TransformerBlock(nn.Module):
     def setup(self):
         self.self_attn = Attention(self.config, dtype=self.dtype)
         self.layer_norm1 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
-        self.mlp = FeedForwardLayer(self.config, dtype=self.dtype)
+        self.feed_forward = FeedForwardLayer(self.config, dtype=self.dtype)
         self.layer_norm2 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
 
     def __call__(self, hidden_states, deterministic: bool = True):
@@ -140,7 +140,7 @@ class TransformerBlock(nn.Module):
 
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.feed_forward(hidden_states)
         hidden_states = residual + hidden_states
 
         return hidden_states
@@ -154,13 +154,13 @@ class Transformer(nn.Module):
         self.layers = [
             TransformerBlock(self.config, name=str(i), dtype=self.dtype) for i in range(self.config.num_hidden_layers)
         ]
-        self.feed_forward_layer = FeedForwardLayer(self.config, dtype=self.dtype)
+        self.feed_forward = FeedForwardLayer(self.config, dtype=self.dtype)
 
     def __call__(self, hidden_states, deterministic: bool = True):
         for layer in self.layers:
             hidden_states = layer(hidden_states, deterministic=deterministic)
 
-        hidden_states = self.feed_forward_layer(hidden_states)
+        hidden_states = self.feed_forward(hidden_states)
 
         return hidden_states
 
@@ -232,7 +232,7 @@ class VectorQuantizer(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        self.embedding = nn.Embed(self.config.n_embed, self.config.embed_dim, dtype=self.dtype)  # TODO: init
+        self.embedding = nn.Embed(self.config.n_embed, self.config.codebook_embed_dim, dtype=self.dtype)  # TODO: init
 
     def __call__(self, hidden_states):
         """
@@ -245,7 +245,7 @@ class VectorQuantizer(nn.Module):
             2. flatten input to (B*H*W,C)
         """
         #  flatten
-        hidden_states_flattended = hidden_states.reshape((-1, self.config.embed_dim))
+        hidden_states_flattended = hidden_states.reshape((-1, self.config.codebook_embed_dim))
 
         # dummy op to init the weights, so we can access them below
         self.embedding(jnp.ones((1, 1), dtype="i4"))
@@ -285,7 +285,7 @@ class VitVQModule(nn.Module):
     def setup(self):
         self.encoder = VitEncoder(self.config, dtype=self.dtype)
         self.factor_in = nn.Dense(
-            self.config.embed_dim, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01)
+            self.config.codebook_embed_dim, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01)
         )
         self.quantizer = VectorQuantizer(self.config, dtype=self.dtype)
         self.factor_out = nn.Dense(

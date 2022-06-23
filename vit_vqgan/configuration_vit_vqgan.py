@@ -5,7 +5,7 @@ class ViTVQGANConfig(PretrainedConfig):
     def __init__(
         self,
         hidden_size=768,
-        embed_dim=32,
+        codebook_embed_dim=32,
         n_embed=8192,
         intermediate_size=768 * 4,
         num_hidden_layers=12,
@@ -24,7 +24,7 @@ class ViTVQGANConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
         self.hidden_size = hidden_size
-        self.embed_dim = embed_dim
+        self.codebook_embed_dim = codebook_embed_dim
         self.n_embed = n_embed
         self.intermediate_size = intermediate_size
         self.dropout = dropout
