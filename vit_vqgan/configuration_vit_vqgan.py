@@ -1,12 +1,13 @@
 from transformers import PretrainedConfig
 
+
 class ViTVQGANConfig(PretrainedConfig):
     def __init__(
         self,
         hidden_size=768,
         embed_dim=32,
         n_embed=8192,
-        intermediate_size=768*4,
+        intermediate_size=768 * 4,
         num_hidden_layers=12,
         num_attention_heads=12,
         image_size=256,
