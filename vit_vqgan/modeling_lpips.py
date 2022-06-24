@@ -52,9 +52,6 @@ class LPIPS(nn.Module):
             val += res[i]
         return val
 
-# Is there a module for this?
-mse = lambda x, y: jnp.mean((x - y) ** 2)
-
 def normalize_tensor(x, eps=1e-10):
     # Use `-1` because we are channel-last
     norm_factor = jnp.sqrt(jnp.sum(x**2, axis=-1, keepdims=True))
