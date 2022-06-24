@@ -26,8 +26,7 @@ class LPIPS(nn.Module):
     lin_weights_filename = 'pretrained/lpips_lin.h5'
     
     def setup(self):
-        # We don't add a scaling layer because I think `VGG16` already includes it
-        # To be verified
+        # We don't add a scaling layer because `VGG16` already includes it
         self.feature_names = ['relu1_2', 'relu2_2', 'relu3_3', 'relu4_3', 'relu5_3']
         
         self.vgg = VGG16(output='activations', pretrained='imagenet', include_head=False)
