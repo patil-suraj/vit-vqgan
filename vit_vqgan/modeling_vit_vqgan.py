@@ -1,4 +1,3 @@
-import math
 from functools import partial
 from typing import Tuple
 
@@ -39,7 +38,7 @@ def to_patches(image, patch_size):
     patches = image.reshape(batch, patch_height, patch_size, patch_width, patch_size, channels)
     # (batch, patch_height, patch_width, patch_size, patch_size, channels)
     patches = patches.transpose(0, 1, 3, 2, 4, 5)
-    # (batch, patch_height*patch_width, patch_size * patch_size * num_patches)
+    # (batch, patch_height*patch_width, patch_size * patch_size * channels)
     patches = patches.reshape(batch, num_patches, -1)
     return patches
 
@@ -303,7 +302,6 @@ class VectorQuantizer(nn.Module):
         min_encoding_indices = jnp.argmin(distance, axis=1)
         # reshape to (batch, num_tokens)
         min_encoding_indices = min_encoding_indices.reshape(hidden_states.shape[0], -1)
-        # z_q = self.embedding(min_encoding_indices).reshape(hidden_states.shape)
         z_q = self.get_codebook_entry(min_encoding_indices)
 
         hidden_states_normed = l2_normalize(hidden_states, axis=-1)
