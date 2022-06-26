@@ -1,4 +1,5 @@
 import math
+from functools import partial
 from typing import Tuple
 
 import flax.linen as nn
@@ -29,16 +30,41 @@ def l2_normalize(x, axis=None, eps=1e-12):
     return x * jax.lax.rsqrt((x * x).sum(axis=axis, keepdims=True) + eps)
 
 
-class VisionEmbeddings(nn.Module):
+# We could simply use einops for this, but I'm a little crazy.
+def to_patches(image, patch_size):
+    batch, height, _, channels = image.shape
+    num_patches = (height // patch_size) ** 2
+    patch_height = patch_width = height // patch_size
+
+    patches = image.reshape(batch, patch_height, patch_size, patch_width, patch_size, channels)
+    # (batch, patch_height, patch_width, patch_size, patch_size, channels)
+    patches = patches.transpose(0, 1, 3, 2, 4, 5)
+    # (batch, patch_height*patch_width, patch_size * patch_size * num_patches)
+    patches = patches.reshape(batch, num_patches, -1)
+    return patches
+
+
+def to_image(patches, patch_size):
+    batch, num_patches, channels = patches.shape
+    patch_height = patch_width = int(num_patches**0.5)
+    image_size = patch_height * patch_size
+
+    patches = patches.reshape(batch, patch_height, patch_width, channels)
+    patches = patches.reshape(batch, patch_height, patch_width, patch_size, patch_size, -1)
+    patches = patches.transpose(0, 1, 3, 2, 4, 5)
+    patches = patches.reshape(batch, image_size, image_size, -1)
+    return patches
+
+
+class ConvPatches(nn.Module):
     config: ViTVQGANConfig
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         embed_dim = self.config.hidden_size
-        image_size = self.config.image_size
         patch_size = self.config.patch_size
 
-        self.patch_embedding = nn.Conv(
+        self.to_patches = nn.Conv(
             embed_dim,
             kernel_size=(patch_size, patch_size),
             strides=(patch_size, patch_size),
@@ -48,32 +74,27 @@ class VisionEmbeddings(nn.Module):
             kernel_init=jax.nn.initializers.normal(),
         )
 
-        self.num_patches = (image_size // patch_size) ** 2
-        self.position_embedding = nn.Embed(self.num_patches, embed_dim, embedding_init=jax.nn.initializers.normal())
-        self.position_ids = jnp.expand_dims(jnp.arange(0, self.num_patches, dtype="i4"), axis=0)
-
     def __call__(self, pixel_values):
-        patch_embeds = self.patch_embedding(pixel_values)
+        patch_embeds = self.to_patches(pixel_values)
         batch_size, height, width, channels = patch_embeds.shape
         patch_embeds = jnp.reshape(patch_embeds, (batch_size, height * width, channels))
-
-        embeddings = patch_embeds + self.position_embedding(self.position_ids)
-        return embeddings
+        return patch_embeds
 
 
 class FeedForwardLayer(nn.Module):
-    config: ViTVQGANConfig
+    dim1: int
+    dim2: int
     activation: str = "relu"
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         self.activation_fn = ACT2FN[self.activation]
         self.fc1 = nn.Dense(
-            self.config.intermediate_size,
+            self.dim1,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(0.01),
         )
-        self.fc2 = nn.Dense(self.config.hidden_size, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
+        self.fc2 = nn.Dense(self.dim2, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
 
     def __call__(self, hidden_states):
         hidden_states = self.fc1(hidden_states)
@@ -147,7 +168,12 @@ class TransformerBlock(nn.Module):
     def setup(self):
         self.self_attn = Attention(self.config, dtype=self.dtype)
         self.layer_norm1 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
-        self.feed_forward = FeedForwardLayer(self.config, activation=self.config.hidden_act, dtype=self.dtype)
+        self.feed_forward = FeedForwardLayer(
+            dim1=self.config.intermediate_size,
+            dim2=self.config.hidden_size,
+            activation=self.config.hidden_act,
+            dtype=self.dtype,
+        )
         self.layer_norm2 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
 
     def __call__(self, hidden_states, deterministic: bool = True):
@@ -173,16 +199,10 @@ class Transformer(nn.Module):
         self.layers = [
             TransformerBlock(self.config, name=str(i), dtype=self.dtype) for i in range(self.config.num_hidden_layers)
         ]
-        self.feed_forward = FeedForwardLayer(
-            self.config, activation=self.config.extra_feed_forward_act, dtype=self.dtype
-        )
 
     def __call__(self, hidden_states, deterministic: bool = True):
         for layer in self.layers:
             hidden_states = layer(hidden_states, deterministic=deterministic)
-
-        hidden_states = self.feed_forward(hidden_states)
-
         return hidden_states
 
 
@@ -191,11 +211,25 @@ class VitEncoder(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        self.embeddings = VisionEmbeddings(self.config, dtype=self.dtype)
+        num_patches = (self.config.image_size // self.config.patch_size) ** 2
+
+        if self.config.use_conv_patches:
+            self.to_patches = ConvPatches(self.config, dtype=self.dtype)
+        else:
+            self.to_patches = partial(to_patches, patch_size=self.config.patch_size)
+
+        self.embed = nn.Dense(self.config.hidden_size, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
+        self.position_embedding = nn.Embed(
+            num_patches, self.config.hidden_size, embedding_init=jax.nn.initializers.normal()
+        )
+        self.position_ids = jnp.expand_dims(jnp.arange(0, num_patches, dtype="i4"), axis=0)
+
         self.transformer = Transformer(self.config, dtype=self.dtype)
 
     def __call__(self, pixel_values, deterministic: bool = True):
-        hidden_states = self.embeddings(pixel_values)
+        patches = self.to_patches(pixel_values)
+        hidden_states = self.embed(patches)
+        hidden_states = hidden_states + self.position_embedding(self.position_ids)
         hidden_states = self.transformer(hidden_states, deterministic=deterministic)
         return hidden_states
 
@@ -205,34 +239,18 @@ class VitDecoder(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        self.num_patches = (self.config.image_size // self.config.patch_size) ** 2
-        self.latent_size = self.config.image_size // self.config.patch_size
-        self.position_ids = jnp.expand_dims(jnp.arange(0, self.num_patches, dtype="i4"), axis=0)
+        num_patches = (self.config.image_size // self.config.patch_size) ** 2
 
+        self.position_ids = jnp.expand_dims(jnp.arange(0, num_patches, dtype="i4"), axis=0)
         self.position_embeddings = nn.Embed(
-            self.num_patches, self.config.hidden_size, embedding_init=jax.nn.initializers.normal()
+            num_patches, self.config.hidden_size, embedding_init=jax.nn.initializers.normal()
         )
         self.transformer = Transformer(self.config, dtype=self.dtype)
-
-        self.to_image = nn.ConvTranspose(
-            self.config.num_channels,
-            kernel_size=(self.config.patch_size, self.config.patch_size),
-            strides=(self.config.patch_size, self.config.patch_size),
-            padding="VALID",
-            use_bias=False,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(),
-        )
 
     def __call__(self, hidden_states, deterministic: bool = True):
         hidden_states = hidden_states + self.position_embeddings(self.position_ids)
         hidden_states = self.transformer(hidden_states, deterministic=deterministic)
-
-        batch, _, channels = hidden_states.shape
-        hidden_states = hidden_states.reshape(batch, self.latent_size, self.latent_size, channels)
-        pixel_values = self.to_image(hidden_states)
-
-        return pixel_values
+        return hidden_states
 
 
 class VectorQuantizer(nn.Module):
@@ -312,15 +330,26 @@ class VitVQModule(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
+        input_dim = self.config.num_channels * (self.config.patch_size**2)
+
         self.encoder = VitEncoder(self.config, dtype=self.dtype)
-        self.factor_in = nn.Dense(
-            self.config.codebook_embed_dim, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01)
+        self.factor_in = FeedForwardLayer(
+            dim1=self.config.intermediate_size,
+            dim2=self.config.codebook_embed_dim,
+            activation="tanh",
+            dtype=self.dtype,
         )
         self.quantizer = VectorQuantizer(self.config, dtype=self.dtype)
         self.factor_out = nn.Dense(
             self.config.hidden_size, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01)
         )
         self.decoder = VitDecoder(self.config, dtype=self.dtype)
+        self.to_patches = FeedForwardLayer(
+            dim1=self.config.intermediate_size,
+            dim2=input_dim,
+            activation="tanh",
+            dtype=self.dtype,
+        )
 
     def encode(self, pixel_values, deterministic: bool = True):
         hidden_states = self.encoder(pixel_values, deterministic=deterministic)
@@ -330,7 +359,9 @@ class VitVQModule(nn.Module):
 
     def decode(self, hidden_states, deterministic: bool = True):
         hidden_states = self.factor_out(hidden_states)
-        pixel_values = self.decoder(hidden_states, deterministic=deterministic)
+        hidden_states = self.decoder(hidden_states, deterministic=deterministic)
+        patches = self.to_patches(hidden_states)
+        pixel_values = to_image(patches, self.config.patch_size)
         return pixel_values
 
     def decode_code(self, code_b):
@@ -341,14 +372,22 @@ class VitVQModule(nn.Module):
     def __call__(self, pixel_values, deterministic: bool = True):
         # 1. create patches and encode
         hidden_states = self.encoder(pixel_values, deterministic=deterministic)
+
         # 2. Project the embeddings to the codebook embedding space and quantize
         # this corresponds to the factorized codebook from the paper https://arxiv.org/abs/2110.04627 section 3.2
         hidden_states = self.factor_in(hidden_states)
         hidden_states, _, loss = self.quantizer(hidden_states)
+
         # 3. Project the quantized embeddings back to the original space
         hidden_states = self.factor_out(hidden_states)
+
         # 4. Decode the quantized embeddings back into the pixel space
-        pixel_values = self.decoder(hidden_states, deterministic=deterministic)
+        hidden_states = self.decoder(hidden_states, deterministic=deterministic)
+
+        # 5. Reconstruct the image from the patches
+        patches = self.to_patches(hidden_states)
+        pixel_values = to_image(patches, self.config.patch_size)
+
         return pixel_values, loss
 
 

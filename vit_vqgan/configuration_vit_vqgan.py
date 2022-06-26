@@ -13,6 +13,7 @@ class ViTVQGANConfig(PretrainedConfig):
         image_size=256,
         num_channels=3,
         patch_size=8,
+        use_conv_patches=False,
         hidden_act="relu",
         extra_feed_forward_act="tanh",
         layer_norm_eps=0.00001,
@@ -32,6 +33,7 @@ class ViTVQGANConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.patch_size = patch_size
+        self.use_conv_patches = use_conv_patches
         self.image_size = image_size
         self.num_channels = num_channels
         self.initializer_range = initializer_range
