@@ -28,7 +28,7 @@ from transformers import (
 )
 from transformers.utils import get_full_repo_name
 
-from vit_vqgan import ViTVQModel, ViTVQGANConfig
+from vit_vqgan import ViTVQModel, ViTVQConfig
 
 
 logger = logging.getLogger(__name__)
@@ -268,7 +268,7 @@ def main():
     train_dataset.set_transform(transform)
 
     # Load pretrained model and tokenizer
-    config = ViTVQGANConfig.from_pretrained(
+    config = ViTVQConfig.from_pretrained(
         model_args.config_name,
         image_size=data_args.image_size,
         commitment_cost=training_args.commitment_cost,

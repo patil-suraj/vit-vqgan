@@ -1,7 +1,7 @@
 from transformers import PretrainedConfig
 
 
-class ViTVQGANConfig(PretrainedConfig):
+class ViTVQConfig(PretrainedConfig):
     def __init__(
         self,
         hidden_size=768,

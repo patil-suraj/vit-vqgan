@@ -9,7 +9,7 @@ from flax.linen.attention import dot_product_attention_weights
 from flax.linen.initializers import variance_scaling
 from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel
 
-from .configuration_vit_vqgan import ViTVQGANConfig
+from .configuration_vit_vqgan import ViTVQConfig
 
 ACT2FN["tanh"] = nn.tanh
 
@@ -56,7 +56,7 @@ def to_image(patches, patch_size):
 
 
 class ConvPatches(nn.Module):
-    config: ViTVQGANConfig
+    config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
@@ -103,7 +103,7 @@ class FeedForwardLayer(nn.Module):
 
 
 class Attention(nn.Module):
-    config: ViTVQGANConfig
+    config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
@@ -161,7 +161,7 @@ class Attention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    config: ViTVQGANConfig
+    config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
@@ -191,7 +191,7 @@ class TransformerBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    config: ViTVQGANConfig
+    config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
@@ -206,7 +206,7 @@ class Transformer(nn.Module):
 
 
 class VitEncoder(nn.Module):
-    config: ViTVQGANConfig
+    config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
@@ -234,7 +234,7 @@ class VitEncoder(nn.Module):
 
 
 class VitDecoder(nn.Module):
-    config: ViTVQGANConfig
+    config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
@@ -264,7 +264,7 @@ class VectorQuantizer(nn.Module):
     _____________________________________________
     """
 
-    config: ViTVQGANConfig
+    config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
@@ -324,7 +324,7 @@ class VectorQuantizer(nn.Module):
 
 
 class VitVQModule(nn.Module):
-    config: ViTVQGANConfig
+    config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
@@ -395,13 +395,13 @@ class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):
     for downloading and loading pretrained models.
     """
 
-    config_class = ViTVQGANConfig
+    config_class = ViTVQConfig
     base_model_prefix = "model"
     module_class: nn.Module = None
 
     def __init__(
         self,
-        config: ViTVQGANConfig,
+        config: ViTVQConfig,
         input_shape=(1, 256, 256, 3),
         seed: int = 0,
         dtype: jnp.dtype = jnp.float32,
