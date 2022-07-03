@@ -11,7 +11,7 @@ class ViTVQGANConfig(PretrainedConfig):
         # of values. It mostly depends on the scale of the reconstruction cost
         # (log p(x|z)). So if the reconstruction cost is 100x higher, the
         # commitment_cost should also be multiplied with the same amount.
-        commitment_cost=0.25, 
+        commitment_cost=0.25,
         intermediate_size=768 * 4,
         num_hidden_layers=12,
         num_attention_heads=12,
