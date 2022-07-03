@@ -329,6 +329,7 @@ class VitVQModule(nn.Module):
 
     def setup(self):
         input_dim = self.config.num_channels * (self.config.patch_size**2)
+        self.latent_size = self.config.image_size // self.config.patch_size
 
         self.encoder = VitEncoder(self.config, dtype=self.dtype)
         self.factor_in = FeedForwardLayer(
@@ -342,12 +343,24 @@ class VitVQModule(nn.Module):
             self.config.hidden_size, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01)
         )
         self.decoder = VitDecoder(self.config, dtype=self.dtype)
-        self.to_patches = FeedForwardLayer(
-            dim1=self.config.intermediate_size,
-            dim2=input_dim,
-            activation="tanh",
-            dtype=self.dtype,
-        )
+
+        if self.config.use_conv_patches:
+            self.to_image = nn.ConvTranspose(
+                self.config.num_channels,
+                kernel_size=(self.config.patch_size, self.config.patch_size),
+                strides=(self.config.patch_size, self.config.patch_size),
+                padding="VALID",
+                use_bias=False,
+                dtype=self.dtype,
+                kernel_init=jax.nn.initializers.normal(),
+            )
+        else:
+            self.to_patches = FeedForwardLayer(
+                dim1=self.config.intermediate_size,
+                dim2=input_dim,
+                activation="tanh",
+                dtype=self.dtype,
+            )
 
     def encode(self, pixel_values, deterministic: bool = True):
         hidden_states = self.encoder(pixel_values, deterministic=deterministic)
@@ -383,8 +396,13 @@ class VitVQModule(nn.Module):
         hidden_states = self.decoder(hidden_states, deterministic=deterministic)
 
         # 5. Reconstruct the image from the patches
-        patches = self.to_patches(hidden_states)
-        pixel_values = to_image(patches, self.config.patch_size)
+        if self.config.use_conv_patches:
+            batch, _, channels = hidden_states.shape
+            hidden_states = hidden_states.reshape(batch, self.latent_size, self.latent_size, channels)
+            pixel_values = self.to_image(hidden_states)
+        else:
+            patches = self.to_patches(hidden_states)
+            pixel_values = to_image(patches, self.config.patch_size)
 
         return pixel_values, loss
 
