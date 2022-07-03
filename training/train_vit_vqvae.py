@@ -403,7 +403,7 @@ def main():
         )
 
         # save checkpoint after each epoch and push checkpoint to the hub
-        if jax.process_index() == 0 and (epoch % 10 == 0):
+        if jax.process_index() == 0 and ((epoch + 1)  % 10 == 0):
             params = jax.device_get(jax.tree_map(lambda x: x[0], state.params))
             model.save_pretrained(training_args.output_dir, params=params)
             if training_args.push_to_hub:
