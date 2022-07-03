@@ -413,6 +413,7 @@ class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):
 
     def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple) -> FrozenDict:
         # init input tensors
+        input_shape = (1, self.config.image_size, self.config.image_size, self.config.num_channels)
         pixel_values = jnp.zeros(input_shape, dtype=jnp.float32)
         params_rng, dropout_rng = jax.random.split(rng)
         rngs = {"params": params_rng, "dropout": dropout_rng}
