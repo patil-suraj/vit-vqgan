@@ -344,8 +344,8 @@ def main():
         dropout_rng, new_dropout_rng = jax.random.split(state.dropout_rng)
 
         def compute_loss(params):
-            predicted_image, codebook_loss = state.apply_fn(batch["input"], params=params, dropout_rng=dropout_rng, train=True)
-            recon_loss = optax.l2_loss(predicted_image, batch["input"]).mean()
+            predicted_images, codebook_loss = state.apply_fn(batch["input"], params=params, dropout_rng=dropout_rng, train=True)
+            recon_loss = jnp.mean((predicted_images - batch["input"]) ** 2)
             loss = recon_loss + codebook_loss
             return loss
 
