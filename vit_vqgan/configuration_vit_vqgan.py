@@ -7,6 +7,11 @@ class ViTVQGANConfig(PretrainedConfig):
         hidden_size=768,
         codebook_embed_dim=32,
         n_embed=8192,
+        # commitment_cost should be set appropriately. It's often useful to try a couple
+        # of values. It mostly depends on the scale of the reconstruction cost
+        # (log p(x|z)). So if the reconstruction cost is 100x higher, the
+        # commitment_cost should also be multiplied with the same amount.
+        commitment_cost=0.25, 
         intermediate_size=768 * 4,
         num_hidden_layers=12,
         num_attention_heads=12,
@@ -28,6 +33,7 @@ class ViTVQGANConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.codebook_embed_dim = codebook_embed_dim
         self.n_embed = n_embed
+        self.commitment_cost = commitment_cost
         self.intermediate_size = intermediate_size
         self.dropout = dropout
         self.num_hidden_layers = num_hidden_layers

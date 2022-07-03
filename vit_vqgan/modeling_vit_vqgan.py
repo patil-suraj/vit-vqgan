@@ -272,7 +272,7 @@ class VectorQuantizer(nn.Module):
         self.embedding = self.param(
             "embedding", embed_init, (self.config.n_embed, self.config.codebook_embed_dim), self.dtype
         )
-        self.beta = 0.25  # TODO: make this is a config or trainable parameter
+        self.beta = self.config.commitment_cost
 
     def __call__(self, hidden_states):
         """
