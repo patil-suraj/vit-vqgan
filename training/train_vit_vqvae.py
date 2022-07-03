@@ -335,7 +335,6 @@ def main():
         apply_fn=model.__call__,
         params=model.params,
         tx=adamw,
-        noise_rng=rng,
         dropout_rng=dropout_rng
     )
 
