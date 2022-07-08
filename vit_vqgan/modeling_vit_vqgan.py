@@ -118,10 +118,26 @@ class Attention(nn.Module):
         self.scale = self.head_dim**-0.5
         self.dropout = self.config.attention_dropout
 
-        self.k_proj = nn.Dense(self.embed_dim, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
-        self.v_proj = nn.Dense(self.embed_dim, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
-        self.q_proj = nn.Dense(self.embed_dim, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
-        self.out_proj = nn.Dense(self.embed_dim, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
+        self.k_proj = nn.Dense(
+            self.embed_dim,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(0.01),
+        )
+        self.v_proj = nn.Dense(
+            self.embed_dim,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(0.01),
+        )
+        self.q_proj = nn.Dense(
+            self.embed_dim,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(0.01),
+        )
+        self.out_proj = nn.Dense(
+            self.embed_dim,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(0.01),
+        )
 
     def _split_heads(self, hidden_states):
         return hidden_states.reshape(hidden_states.shape[:2] + (self.num_heads, self.head_dim))
@@ -217,9 +233,15 @@ class VitEncoder(nn.Module):
         else:
             self.to_patches = partial(to_patches, patch_size=self.config.patch_size)
 
-        self.embed = nn.Dense(self.config.hidden_size, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
+        self.embed = nn.Dense(
+            self.config.hidden_size,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(0.01),
+        )
         self.position_embedding = nn.Embed(
-            num_patches, self.config.hidden_size, embedding_init=jax.nn.initializers.normal()
+            num_patches,
+            self.config.hidden_size,
+            embedding_init=jax.nn.initializers.normal(),
         )
         self.position_ids = jnp.expand_dims(jnp.arange(0, num_patches, dtype="i4"), axis=0)
 
@@ -242,7 +264,9 @@ class VitDecoder(nn.Module):
 
         self.position_ids = jnp.expand_dims(jnp.arange(0, num_patches, dtype="i4"), axis=0)
         self.position_embeddings = nn.Embed(
-            num_patches, self.config.hidden_size, embedding_init=jax.nn.initializers.normal()
+            num_patches,
+            self.config.hidden_size,
+            embedding_init=jax.nn.initializers.normal(),
         )
         self.transformer = Transformer(self.config, dtype=self.dtype)
 
@@ -270,7 +294,10 @@ class VectorQuantizer(nn.Module):
     def setup(self):
         embed_init = variance_scaling(1.0, "fan_in", "normal", out_axis=0)
         self.embedding = self.param(
-            "embedding", embed_init, (self.config.n_embed, self.config.codebook_embed_dim), self.dtype
+            "embedding",
+            embed_init,
+            (self.config.n_embed, self.config.codebook_embed_dim),
+            self.dtype,
         )
         self.beta = self.config.commitment_cost
 
@@ -340,7 +367,9 @@ class VitVQModule(nn.Module):
         )
         self.quantizer = VectorQuantizer(self.config, dtype=self.dtype)
         self.factor_out = nn.Dense(
-            self.config.hidden_size, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01)
+            self.config.hidden_size,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(0.01),
         )
         self.decoder = VitDecoder(self.config, dtype=self.dtype)
 
@@ -365,7 +394,7 @@ class VitVQModule(nn.Module):
     def encode(self, pixel_values, deterministic: bool = True):
         hidden_states = self.encoder(pixel_values, deterministic=deterministic)
         hidden_states = self.factor_in(hidden_states)
-        quant_states, indices, _ = self.quantize(hidden_states)
+        quant_states, indices, _ = self.quantizer(hidden_states)
         return quant_states, indices
 
     def decode(self, hidden_states, deterministic: bool = True):
@@ -376,7 +405,7 @@ class VitVQModule(nn.Module):
         return pixel_values
 
     def decode_code(self, code_b):
-        hidden_states = self.quantize.get_codebook_entry(code_b)
+        hidden_states = self.quantizer.get_codebook_entry(code_b)
         pixel_values = self.decode(hidden_states)
         return pixel_values
 
@@ -427,26 +456,54 @@ class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ):
         module = self.module_class(config=config, dtype=dtype, **kwargs)
-        super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype, _do_init=_do_init)
+        super().__init__(
+            config,
+            module,
+            input_shape=input_shape,
+            seed=seed,
+            dtype=dtype,
+            _do_init=_do_init,
+        )
 
     def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple) -> FrozenDict:
         # init input tensors
-        input_shape = (1, self.config.image_size, self.config.image_size, self.config.num_channels)
+        input_shape = (
+            1,
+            self.config.image_size,
+            self.config.image_size,
+            self.config.num_channels,
+        )
         pixel_values = jnp.zeros(input_shape, dtype=jnp.float32)
         params_rng, dropout_rng = jax.random.split(rng)
         rngs = {"params": params_rng, "dropout": dropout_rng}
 
         return self.module.init(rngs, pixel_values)["params"]
 
-    def encode(self, pixel_values, params: dict = None, dropout_rng: jax.random.PRNGKey = None, train: bool = False):
+    def encode(
+        self,
+        pixel_values,
+        params: dict = None,
+        dropout_rng: jax.random.PRNGKey = None,
+        train: bool = False,
+    ):
         # Handle any PRNG if needed
         rngs = {"dropout": dropout_rng} if dropout_rng is not None else {}
 
         return self.module.apply(
-            {"params": params or self.params}, jnp.array(pixel_values), not train, rngs=rngs, method=self.module.encode
+            {"params": params or self.params},
+            jnp.array(pixel_values),
+            not train,
+            rngs=rngs,
+            method=self.module.encode,
         )
 
-    def decode(self, hidden_states, params: dict = None, dropout_rng: jax.random.PRNGKey = None, train: bool = False):
+    def decode(
+        self,
+        hidden_states,
+        params: dict = None,
+        dropout_rng: jax.random.PRNGKey = None,
+        train: bool = False,
+    ):
         # Handle any PRNG if needed
         rngs = {"dropout": dropout_rng} if dropout_rng is not None else {}
 
@@ -460,7 +517,9 @@ class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):
 
     def decode_code(self, indices, params: dict = None):
         return self.module.apply(
-            {"params": params or self.params}, jnp.array(indices, dtype="i4"), method=self.module.decode_code
+            {"params": params or self.params},
+            jnp.array(indices, dtype="i4"),
+            method=self.module.decode_code,
         )
 
     def __call__(
