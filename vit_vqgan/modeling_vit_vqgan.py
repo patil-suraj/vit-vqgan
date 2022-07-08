@@ -84,6 +84,7 @@ class FeedForwardLayer(nn.Module):
     dim1: int
     dim2: int
     activation: str = "relu"
+    use_glu: bool = False
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
@@ -98,10 +99,18 @@ class FeedForwardLayer(nn.Module):
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
+        if self.config.use_glu:
+            self.fc1_w = nn.Dense(
+                self.dim2,
+                dtype=self.dtype,
+                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+            )
 
-    def __call__(self, hidden_states):
-        hidden_states = self.fc1(hidden_states)
+    def __call__(self, x):
+        hidden_states = self.fc1(x)
         hidden_states = self.activation_fn(hidden_states)
+        if self.config.use_glu:
+            hidden_states *= self.fc1_w(x)
         hidden_states = self.fc2(hidden_states)
         return hidden_states
 
@@ -204,6 +213,7 @@ class TransformerBlock(nn.Module):
             dim1=self.config.intermediate_size,
             dim2=self.config.hidden_size,
             activation=self.config.hidden_act,
+            use_glu=self.config.use_glu,
             dtype=self.dtype,
         )
         self.layer_norm2 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
@@ -382,6 +392,7 @@ class VitVQModule(nn.Module):
                 dim1=self.config.intermediate_size,
                 dim2=self.config.codebook_embed_dim,
                 activation=self.config.extra_feed_forward_act,
+                use_glu=self.config.use_glu,
                 dtype=self.dtype,
             )
             self.factor_out = nn.Dense(
@@ -413,6 +424,7 @@ class VitVQModule(nn.Module):
                 dim1=self.config.intermediate_size,
                 dim2=input_dim,
                 activation="tanh",
+                use_glu=self.config.use_glu,
                 dtype=self.dtype,
             )
 
