@@ -1,3 +1,4 @@
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -11,7 +12,7 @@ class Dataset:
     valid_folder: str = None
     batch_size: int = 64
     image_size: int = 256
-    dataset_seed: int = 42
+    seed_dataset: int = None
     format: str = "rgb"  # rgb or lab
     train: tf.data.Dataset = field(init=False)
     valid: tf.data.Dataset = field(init=False)
@@ -21,15 +22,17 @@ class Dataset:
         # verify valid args
         assert self.format in ["rgb", "lab"], f"Invalid format: {self.format}"
 
+        # define rng
+        if self.seed_dataset is None:
+            self.seed_dataset = random.randint(0, 2**32 - 1)
+        self.rng = tf.random.Generator.from_seed(self.seed_dataset, alg="philox")
+
         # define parsing function
         features = {"webp": tf.io.FixedLenFeature([], tf.string)}
 
         def _parse_function(example_proto):
             parsed_features = tf.io.parse_single_example(example_proto, features)
             return tfio.image.decode_webp(parsed_features["webp"])[..., :3]
-
-        # define augmentation function
-        self.rng = tf.random.Generator.from_seed(self.dataset_seed, alg="philox")
 
         def _augment(image, seed):
             # create a new seed
@@ -79,7 +82,7 @@ class Dataset:
                     )
 
                 # batch, normalize and prefetch
-                ds = ds.batch(self.batch_size)
+                ds = ds.batch(self.batch_size, drop_remainder=True)
                 ds = ds.map(_normalize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
                 ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
                 setattr(self, dataset, ds)
