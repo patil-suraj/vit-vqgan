@@ -70,7 +70,7 @@ class ConvPatches(nn.Module):
             padding="VALID",
             use_bias=False,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(),
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
 
     def __call__(self, pixel_values):
@@ -91,9 +91,13 @@ class FeedForwardLayer(nn.Module):
         self.fc1 = nn.Dense(
             self.dim1,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
-        self.fc2 = nn.Dense(self.dim2, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
+        self.fc2 = nn.Dense(
+            self.dim2,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+        )
 
     def __call__(self, hidden_states):
         hidden_states = self.fc1(hidden_states)
@@ -121,22 +125,22 @@ class Attention(nn.Module):
         self.k_proj = nn.Dense(
             self.embed_dim,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
         self.v_proj = nn.Dense(
             self.embed_dim,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
         self.q_proj = nn.Dense(
             self.embed_dim,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
         self.out_proj = nn.Dense(
             self.embed_dim,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
 
     def _split_heads(self, hidden_states):
@@ -236,12 +240,12 @@ class VitEncoder(nn.Module):
         self.embed = nn.Dense(
             self.config.hidden_size,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
         self.position_embedding = nn.Embed(
             num_patches,
             self.config.hidden_size,
-            embedding_init=jax.nn.initializers.normal(),
+            embedding_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
         self.position_ids = jnp.expand_dims(jnp.arange(0, num_patches, dtype="i4"), axis=0)
 
@@ -266,7 +270,7 @@ class VitDecoder(nn.Module):
         self.position_embeddings = nn.Embed(
             num_patches,
             self.config.hidden_size,
-            embedding_init=jax.nn.initializers.normal(),
+            embedding_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
         self.transformer = Transformer(self.config, dtype=self.dtype)
 
@@ -362,14 +366,14 @@ class VitVQModule(nn.Module):
         self.factor_in = FeedForwardLayer(
             dim1=self.config.intermediate_size,
             dim2=self.config.codebook_embed_dim,
-            activation="tanh",
+            activation=self.config.extra_feed_forward_act,
             dtype=self.dtype,
         )
         self.quantizer = VectorQuantizer(self.config, dtype=self.dtype)
         self.factor_out = nn.Dense(
             self.config.hidden_size,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
         self.decoder = VitDecoder(self.config, dtype=self.dtype)
 
@@ -381,7 +385,7 @@ class VitVQModule(nn.Module):
                 padding="VALID",
                 use_bias=False,
                 dtype=self.dtype,
-                kernel_init=jax.nn.initializers.normal(),
+                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             )
         else:
             self.to_patches = FeedForwardLayer(
