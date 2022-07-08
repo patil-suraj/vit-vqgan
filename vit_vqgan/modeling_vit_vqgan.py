@@ -142,6 +142,17 @@ class Attention(nn.Module):
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
+        if self.config.post_attention_conv:
+            self.conv = nn.Conv(
+                self.embed_dim,
+                kernel_size=(3, 3),
+                strides=(1, 1),
+                padding="SAME",
+                feature_group_count=self.embed_dim,
+                use_bias=False,
+                dtype=self.dtype,
+                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+            )
 
     def _split_heads(self, hidden_states):
         return hidden_states.reshape(hidden_states.shape[:2] + (self.num_heads, self.head_dim))
@@ -176,6 +187,8 @@ class Attention(nn.Module):
         attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value)
         attn_output = self._merge_heads(attn_output)
         attn_output = self.out_proj(attn_output)
+        if self.config.post_attention_conv:
+            attn_output = self.conv(attn_output)
 
         return attn_output
 

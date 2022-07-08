@@ -19,6 +19,7 @@ class ViTVQConfig(PretrainedConfig):
         num_channels=3,
         patch_size=16,
         use_conv_patches=False,
+        post_attention_conv=False,
         hidden_act="relu",
         extra_projection=True,
         extra_feed_forward_act="tanh",
@@ -40,6 +41,7 @@ class ViTVQConfig(PretrainedConfig):
         self.num_attention_heads = num_attention_heads
         self.patch_size = patch_size
         self.use_conv_patches = use_conv_patches
+        self.post_attention_conv = post_attention_conv
         self.image_size = image_size
         self.num_channels = num_channels
         self.initializer_range = initializer_range
