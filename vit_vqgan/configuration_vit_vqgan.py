@@ -6,7 +6,7 @@ class ViTVQConfig(PretrainedConfig):
         self,
         hidden_size=768,
         codebook_embed_dim=32,
-        n_embed=8192,
+        n_embed=16384,
         # commitment_cost should be set appropriately. It's often useful to try a couple
         # of values. It mostly depends on the scale of the reconstruction cost
         # (log p(x|z)). So if the reconstruction cost is 100x higher, the
@@ -17,15 +17,14 @@ class ViTVQConfig(PretrainedConfig):
         num_attention_heads=12,
         image_size=256,
         num_channels=3,
-        patch_size=8,
+        patch_size=16,
         use_conv_patches=False,
         hidden_act="relu",
         extra_feed_forward_act="tanh",
         layer_norm_eps=0.00001,
         dropout=0.0,
         attention_dropout=0.0,
-        initializer_range=0.02,
-        initializer_factor=1.0,
+        initializer_range=0.01,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -43,7 +42,6 @@ class ViTVQConfig(PretrainedConfig):
         self.image_size = image_size
         self.num_channels = num_channels
         self.initializer_range = initializer_range
-        self.initializer_factor = initializer_factor
         self.attention_dropout = attention_dropout
         self.layer_norm_eps = layer_norm_eps
         self.hidden_act = hidden_act
