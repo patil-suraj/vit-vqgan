@@ -10,8 +10,8 @@ class Dataset:
     train_folder: str = None
     valid_folder: str = None
     batch_size: int = 64
-    size: int = 256
-    seed: int = 42
+    image_size: int = 256
+    dataset_seed: int = 42
     format: str = "rgb"  # rgb or lab
     train: tf.data.Dataset = field(init=False)
     valid: tf.data.Dataset = field(init=False)
@@ -30,14 +30,14 @@ class Dataset:
             return tfio.image.decode_webp(parsed_features["webp"])
 
         # define augmentation function
-        self.rng = tf.random.Generator.from_seed(self.seed, alg="philox")
+        self.rng = tf.random.Generator.from_seed(self.dataset_seed, alg="philox")
 
         def _augment(image, seed):
             # create a new seed
             new_seed = tf.random.experimental.stateless_split(seed, num=1)[0, :]
             # apply random crop
             return tf.image.stateless_random_crop(
-                image, size=[self.size, self.size, 3], seed=new_seed
+                image, size=[self.image_size, self.image_size, 3], seed=new_seed
             )
 
         # augmentation wrapper
