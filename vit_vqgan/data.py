@@ -18,7 +18,6 @@ class Dataset:
     rng: tf.random.Generator = field(init=False)
 
     def __post_init__(self):
-
         # verify valid args
         assert self.format in ["rgb", "lab"], f"Invalid format: {self.format}"
 
@@ -27,7 +26,7 @@ class Dataset:
 
         def _parse_function(example_proto):
             parsed_features = tf.io.parse_single_example(example_proto, features)
-            return tfio.image.decode_webp(parsed_features["webp"])
+            return tfio.image.decode_webp(parsed_features["webp"])[..., :3]
 
         # define augmentation function
         self.rng = tf.random.Generator.from_seed(self.dataset_seed, alg="philox")
@@ -36,9 +35,7 @@ class Dataset:
             # create a new seed
             new_seed = tf.random.experimental.stateless_split(seed, num=1)[0, :]
             # apply random crop
-            return tf.image.stateless_random_crop(
-                image, size=[self.image_size, self.image_size, 3], seed=new_seed
-            )
+            return tf.image.stateless_random_crop(image, size=[self.image_size, self.image_size, 3], seed=new_seed)
 
         # augmentation wrapper
         def _augment_wrapper(image):
@@ -55,9 +52,7 @@ class Dataset:
                 # convert to lab
                 image = tfio.experimental.color.rgb_to_lab(image)
                 # project to [-1, 1]
-                return image / tf.constant([50.0, 128.0, 128.0]) + tf.constant(
-                    [-1.0, 0.0, 0.0]
-                )
+                return image / tf.constant([50.0, 128.0, 128.0]) + tf.constant([-1.0, 0.0, 0.0])
 
         for folder, dataset, augment in zip(
             [self.train_folder, self.valid_folder],
@@ -66,18 +61,14 @@ class Dataset:
         ):
             if folder is not None:
                 # load files
-                files = [
-                    f"{Path(f)}" for f in Path(self.train_folder).glob("*.tfrecord")
-                ]
+                files = [f"{Path(f)}" for f in Path(folder).glob("*.tfrecord")]
                 assert len(files) > 0, f"No files found at folder: {folder}"
 
                 # load dataset
                 ds = tf.data.TFRecordDataset(files)
 
                 # parse dataset
-                ds = ds.map(
-                    _parse_function, num_parallel_calls=tf.data.experimental.AUTOTUNE
-                )
+                ds = ds.map(_parse_function, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
                 if augment:
                     ds = ds.shuffle(1000)
@@ -89,8 +80,6 @@ class Dataset:
 
                 # batch, normalize and prefetch
                 ds = ds.batch(self.batch_size)
-                ds = ds.map(
-                    _normalize, num_parallel_calls=tf.data.experimental.AUTOTUNE
-                )
+                ds = ds.map(_normalize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
                 ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
                 setattr(self, dataset, ds)
