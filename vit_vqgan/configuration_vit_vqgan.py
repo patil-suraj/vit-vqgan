@@ -29,6 +29,7 @@ class ViTVQConfig(PretrainedConfig):
         attention_dropout=0.0,
         initializer_range=0.01,
         use_bias=False,
+        ln_positions="preln",  # preln, normformer
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -54,3 +55,4 @@ class ViTVQConfig(PretrainedConfig):
         self.extra_projection = extra_projection
         self.extra_feed_forward_act = extra_feed_forward_act
         self.use_bias = use_bias
+        self.ln_positions = ln_positions

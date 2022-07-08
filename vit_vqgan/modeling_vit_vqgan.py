@@ -47,7 +47,6 @@ def to_image(patches, patch_size):
     batch, num_patches, channels = patches.shape
     patch_height = patch_width = int(num_patches**0.5)
     image_size = patch_height * patch_size
-
     patches = patches.reshape(batch, patch_height, patch_width, channels)
     patches = patches.reshape(batch, patch_height, patch_width, patch_size, patch_size, -1)
     patches = patches.transpose(0, 1, 3, 2, 4, 5)
@@ -62,7 +61,6 @@ class ConvPatches(nn.Module):
     def setup(self):
         embed_dim = self.config.hidden_size
         patch_size = self.config.patch_size
-
         self.to_patches = nn.Conv(
             embed_dim,
             kernel_size=(patch_size, patch_size),
@@ -89,6 +87,7 @@ class FeedForwardLayer(nn.Module):
 
     @nn.compact
     def __call__(self, x, deterministic: bool = True):
+        x = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(x)
         hidden_states = nn.Dense(
             self.dim1,
             use_bias=self.config.use_bias,
@@ -105,6 +104,8 @@ class FeedForwardLayer(nn.Module):
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
                 name="fc1_glu",
             )(x)
+        if self.config.ln_positions == "normformer":
+            hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(hidden_states)
         hidden_states = nn.Dropout(rate=self.config.dropout)(x, deterministic=deterministic)
         hidden_states = nn.Dense(
             self.dim2,
@@ -212,28 +213,26 @@ class TransformerBlock(nn.Module):
     config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
-    def setup(self):
-        self.self_attn = Attention(self.config, dtype=self.dtype)
-        self.layer_norm1 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
-        self.feed_forward = FeedForwardLayer(
+    @nn.compact
+    def __call__(self, hidden_states, deterministic: bool = True):
+        residual = hidden_states
+
+        hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(hidden_states)
+        hidden_states = Attention(self.config, dtype=self.dtype)(
+            hidden_states=hidden_states, deterministic=deterministic
+        )
+        if self.config.ln_positions == "normformer":
+            hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(hidden_states)
+        hidden_states = residual + hidden_states
+
+        residual = hidden_states
+        hidden_states = FeedForwardLayer(
             dim1=self.config.intermediate_size,
             dim2=self.config.hidden_size,
             activation=self.config.hidden_act,
             config=self.config,
             dtype=self.dtype,
-        )
-        self.layer_norm2 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
-
-    def __call__(self, hidden_states, deterministic: bool = True):
-        residual = hidden_states
-
-        hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(hidden_states=hidden_states, deterministic=deterministic)
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.layer_norm2(hidden_states)
-        hidden_states = self.feed_forward(hidden_states, deterministic=deterministic)
+        )(hidden_states, deterministic=deterministic)
         hidden_states = residual + hidden_states
 
         return hidden_states
