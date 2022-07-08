@@ -2,6 +2,7 @@ import random
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import jax
 import tensorflow as tf
 import tensorflow_io as tfio
 
@@ -17,6 +18,7 @@ class Dataset:
     train: tf.data.Dataset = field(init=False)
     valid: tf.data.Dataset = field(init=False)
     rng: tf.random.Generator = field(init=False)
+    multi_hosts: bool = field(init=False)
 
     def __post_init__(self):
         # verify valid args
@@ -26,6 +28,9 @@ class Dataset:
         if self.seed_dataset is None:
             self.seed_dataset = random.randint(0, 2**32 - 1)
         self.rng = tf.random.Generator.from_seed(self.seed_dataset, alg="philox")
+
+        # check if we are on multi-hosts
+        self.multi_hosts = jax.process_count() > 1
 
         # define parsing function
         features = {"webp": tf.io.FixedLenFeature([], tf.string)}
@@ -69,6 +74,10 @@ class Dataset:
 
                 # load dataset
                 ds = tf.data.TFRecordDataset(files)
+
+                if self.multi_hosts and dataset == "train":
+                    # repeat indefinitely
+                    ds = ds.repeat()
 
                 # parse dataset
                 ds = ds.map(_parse_function, num_parallel_calls=tf.data.experimental.AUTOTUNE)
