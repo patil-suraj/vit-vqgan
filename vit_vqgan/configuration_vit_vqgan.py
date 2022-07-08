@@ -20,6 +20,7 @@ class ViTVQConfig(PretrainedConfig):
         patch_size=16,
         use_conv_patches=False,
         hidden_act="relu",
+        extra_projection=True,
         extra_feed_forward_act="tanh",
         layer_norm_eps=0.00001,
         dropout=0.0,
@@ -45,4 +46,5 @@ class ViTVQConfig(PretrainedConfig):
         self.attention_dropout = attention_dropout
         self.layer_norm_eps = layer_norm_eps
         self.hidden_act = hidden_act
+        self.extra_projection = extra_projection
         self.extra_feed_forward_act = extra_feed_forward_act

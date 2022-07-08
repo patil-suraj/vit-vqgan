@@ -363,18 +363,26 @@ class VitVQModule(nn.Module):
         self.latent_size = self.config.image_size // self.config.patch_size
 
         self.encoder = VitEncoder(self.config, dtype=self.dtype)
-        self.factor_in = FeedForwardLayer(
-            dim1=self.config.intermediate_size,
-            dim2=self.config.codebook_embed_dim,
-            activation=self.config.extra_feed_forward_act,
-            dtype=self.dtype,
-        )
+
+        if self.config.extra_projection:
+            self.factor_in = FeedForwardLayer(
+                dim1=self.config.intermediate_size,
+                dim2=self.config.codebook_embed_dim,
+                activation=self.config.extra_feed_forward_act,
+                dtype=self.dtype,
+            )
+            self.factor_out = nn.Dense(
+                self.config.hidden_size,
+                dtype=self.dtype,
+                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+            )
+        else:
+            id = lambda x: x
+            self.factor_in = id
+            self.factor_out = id
+
         self.quantizer = VectorQuantizer(self.config, dtype=self.dtype)
-        self.factor_out = nn.Dense(
-            self.config.hidden_size,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-        )
+
         self.decoder = VitDecoder(self.config, dtype=self.dtype)
 
         if self.config.use_conv_patches:
