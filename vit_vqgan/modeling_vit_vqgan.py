@@ -83,35 +83,34 @@ class ConvPatches(nn.Module):
 class FeedForwardLayer(nn.Module):
     dim1: int
     dim2: int
-    activation: str = "relu"
-    use_glu: bool = False
+    activation: str
+    config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
-    def setup(self):
-        self.activation_fn = ACT2FN[self.activation]
-        self.fc1 = nn.Dense(
+    @nn.compact
+    def __call__(self, x, deterministic: bool = True):
+        hidden_states = nn.Dense(
             self.dim1,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-        )
-        self.fc2 = nn.Dense(
-            self.dim2,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-        )
+            name="fc1",
+        )(x)
+        hidden_states = ACT2FN[self.activation](hidden_states)
         if self.config.use_glu:
-            self.fc1_w = nn.Dense(
+            hidden_states *= nn.Dense(
                 self.dim2,
                 dtype=self.dtype,
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-            )
-
-    def __call__(self, x):
-        hidden_states = self.fc1(x)
-        hidden_states = self.activation_fn(hidden_states)
-        if self.config.use_glu:
-            hidden_states *= self.fc1_w(x)
-        hidden_states = self.fc2(hidden_states)
+                name="fc1_glu",
+            )(x)
+        hidden_states = nn.Dropout(rate=self.config.dropout)(x, deterministic=deterministic)
+        hidden_states = nn.Dense(
+            self.dim2,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+            name="fc2",
+        )(hidden_states)
+        hidden_states = nn.Dropout(rate=self.config.dropout)(x, deterministic=deterministic)
         return hidden_states
 
 
@@ -213,7 +212,7 @@ class TransformerBlock(nn.Module):
             dim1=self.config.intermediate_size,
             dim2=self.config.hidden_size,
             activation=self.config.hidden_act,
-            use_glu=self.config.use_glu,
+            config=self.config,
             dtype=self.dtype,
         )
         self.layer_norm2 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
@@ -227,7 +226,7 @@ class TransformerBlock(nn.Module):
 
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
-        hidden_states = self.feed_forward(hidden_states)
+        hidden_states = self.feed_forward(hidden_states, deterministic=deterministic)
         hidden_states = residual + hidden_states
 
         return hidden_states
@@ -392,7 +391,7 @@ class VitVQModule(nn.Module):
                 dim1=self.config.intermediate_size,
                 dim2=self.config.codebook_embed_dim,
                 activation=self.config.extra_feed_forward_act,
-                use_glu=self.config.use_glu,
+                config=self.config,
                 dtype=self.dtype,
             )
             self.factor_out = nn.Dense(
@@ -401,9 +400,8 @@ class VitVQModule(nn.Module):
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             )
         else:
-            id = lambda x: x
-            self.factor_in = id
-            self.factor_out = id
+            self.factor_in = lambda x, _: x
+            self.factor_out = lambda x: x
 
         self.quantizer = VectorQuantizer(self.config, dtype=self.dtype)
 
@@ -424,13 +422,13 @@ class VitVQModule(nn.Module):
                 dim1=self.config.intermediate_size,
                 dim2=input_dim,
                 activation="tanh",
-                use_glu=self.config.use_glu,
+                config=self.config,
                 dtype=self.dtype,
             )
 
     def encode(self, pixel_values, deterministic: bool = True):
         hidden_states = self.encoder(pixel_values, deterministic=deterministic)
-        hidden_states = self.factor_in(hidden_states)
+        hidden_states = self.factor_in(hidden_states, deterministic=deterministic)
         quant_states, indices, _ = self.quantizer(hidden_states)
         return quant_states, indices
 
@@ -452,7 +450,7 @@ class VitVQModule(nn.Module):
 
         # 2. Project the embeddings to the codebook embedding space and quantize
         # this corresponds to the factorized codebook from the paper https://arxiv.org/abs/2110.04627 section 3.2
-        hidden_states = self.factor_in(hidden_states)
+        hidden_states = self.factor_in(hidden_states, deterministic=deterministic)
         hidden_states, _, loss = self.quantizer(hidden_states)
 
         # 3. Project the quantized embeddings back to the original space
