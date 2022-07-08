@@ -68,7 +68,7 @@ class ConvPatches(nn.Module):
             kernel_size=(patch_size, patch_size),
             strides=(patch_size, patch_size),
             padding="VALID",
-            use_bias=False,
+            use_bias=self.config.use_bias,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
@@ -91,6 +91,7 @@ class FeedForwardLayer(nn.Module):
     def __call__(self, x, deterministic: bool = True):
         hidden_states = nn.Dense(
             self.dim1,
+            use_bias=self.config.use_bias,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             name="fc1",
@@ -99,6 +100,7 @@ class FeedForwardLayer(nn.Module):
         if self.config.use_glu:
             hidden_states *= nn.Dense(
                 self.dim2,
+                use_bias=self.config.use_bias,
                 dtype=self.dtype,
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
                 name="fc1_glu",
@@ -106,6 +108,7 @@ class FeedForwardLayer(nn.Module):
         hidden_states = nn.Dropout(rate=self.config.dropout)(x, deterministic=deterministic)
         hidden_states = nn.Dense(
             self.dim2,
+            use_bias=self.config.use_bias,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             name="fc2",
@@ -132,21 +135,25 @@ class Attention(nn.Module):
 
         self.k_proj = nn.Dense(
             self.embed_dim,
+            use_bias=self.config.use_bias,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
         self.v_proj = nn.Dense(
             self.embed_dim,
+            use_bias=self.config.use_bias,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
         self.q_proj = nn.Dense(
             self.embed_dim,
+            use_bias=self.config.use_bias,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
         self.out_proj = nn.Dense(
             self.embed_dim,
+            use_bias=self.config.use_bias,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
@@ -157,7 +164,7 @@ class Attention(nn.Module):
                 strides=(1, 1),
                 padding="SAME",
                 feature_group_count=self.embed_dim,
-                use_bias=False,
+                use_bias=self.config.use_bias,
                 dtype=self.dtype,
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             )
@@ -261,6 +268,7 @@ class VitEncoder(nn.Module):
 
         self.embed = nn.Dense(
             self.config.hidden_size,
+            use_bias=self.config.use_bias,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
@@ -396,6 +404,7 @@ class VitVQModule(nn.Module):
             )
             self.factor_out = nn.Dense(
                 self.config.hidden_size,
+                use_bias=self.config.use_bias,
                 dtype=self.dtype,
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             )
@@ -413,7 +422,7 @@ class VitVQModule(nn.Module):
                 kernel_size=(self.config.patch_size, self.config.patch_size),
                 strides=(self.config.patch_size, self.config.patch_size),
                 padding="VALID",
-                use_bias=False,
+                use_bias=self.config.use_bias,
                 dtype=self.dtype,
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             )

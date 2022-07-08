@@ -28,6 +28,7 @@ class ViTVQConfig(PretrainedConfig):
         dropout=0.0,
         attention_dropout=0.0,
         initializer_range=0.01,
+        use_bias=False,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -52,3 +53,4 @@ class ViTVQConfig(PretrainedConfig):
         self.hidden_act = hidden_act
         self.extra_projection = extra_projection
         self.extra_feed_forward_act = extra_feed_forward_act
+        self.use_bias = use_bias
