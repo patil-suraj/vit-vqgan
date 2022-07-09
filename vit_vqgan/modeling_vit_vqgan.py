@@ -106,7 +106,7 @@ class FeedForwardLayer(nn.Module):
             )(x)
         if self.config.ln_positions == "normformer":
             hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(hidden_states)
-        hidden_states = nn.Dropout(rate=self.config.dropout)(x, deterministic=deterministic)
+        hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
         hidden_states = nn.Dense(
             self.dim2,
             use_bias=self.config.use_bias,
@@ -114,7 +114,7 @@ class FeedForwardLayer(nn.Module):
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             name="fc2",
         )(hidden_states)
-        hidden_states = nn.Dropout(rate=self.config.dropout)(x, deterministic=deterministic)
+        hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
         return hidden_states
 
 
@@ -408,6 +408,7 @@ class VitVQModule(nn.Module):
         else:
             self.factor_in = lambda x, _: x
             self.factor_out = lambda x: x
+            raise NotImplemented("VectorQuantizer expected dimensions not implemented without extra projection")
 
         self.quantizer = VectorQuantizer(self.config, dtype=self.dtype)
 
