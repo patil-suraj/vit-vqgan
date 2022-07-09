@@ -7,11 +7,12 @@ class ViTVQConfig(PretrainedConfig):
         hidden_size=768,
         codebook_embed_dim=32,
         n_embed=16384,
-        # commitment_cost should be set appropriately. It's often useful to try a couple
+        # cost_e_latent is commitment_cost and should be set appropriately. It's often useful to try a couple
         # of values. It mostly depends on the scale of the reconstruction cost
         # (log p(x|z)). So if the reconstruction cost is 100x higher, the
         # commitment_cost should also be multiplied with the same amount.
-        cost_recon=1.0,
+        cost_l1=1.0,
+        cost_l2=1.0,
         cost_q_latent=1.0,
         cost_e_latent=0.25,
         intermediate_size=768 * 4,
@@ -36,7 +37,8 @@ class ViTVQConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
 
-        self.cost_recon = cost_recon
+        self.cost_l1 = cost_l1
+        self.cost_l2 = cost_l2
         self.cost_q_latent = cost_q_latent
         self.cost_e_latent = cost_e_latent
         self.hidden_size = hidden_size
