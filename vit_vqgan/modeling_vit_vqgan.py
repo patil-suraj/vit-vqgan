@@ -159,6 +159,7 @@ class Attention(nn.Module):
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
         if self.config.post_attention_conv:
+            # suggestion from Phil Wang
             self.conv = nn.Conv(
                 self.embed_dim,
                 kernel_size=(3, 3),
