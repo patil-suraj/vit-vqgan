@@ -6,30 +6,25 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
-
-# for dataset and preprocessing
-import torch
-from datasets import load_dataset
-from torchvision import transforms
-from tqdm import tqdm
+import wandb
 
 import jax
 import jax.numpy as jnp
 import optax
+
+# for dataset and preprocessing
 import transformers
 from flax import jax_utils
 from flax.jax_utils import unreplicate
 from flax.training import train_state
-from flax.training.common_utils import get_metrics, shard, shard_prng_key
+from flax.training.common_utils import shard, shard_prng_key
 from huggingface_hub import Repository
-from transformers import (
-    HfArgumentParser,
-    set_seed,
-)
+from tqdm import tqdm
+from transformers import HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
 
-from vit_vqgan import ViTVQModel, ViTVQConfig
-
+from vit_vqgan import ViTVQConfig, ViTVQModel
+from vit_vqgan.data import Dataset
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +32,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TrainingArguments:
     output_dir: str = field(
-        metadata={"help": "The output directory where the model predictions and checkpoints will be written."},
+        metadata={
+            "help": "The output directory where the model predictions and checkpoints will be written."
+        },
     )
     overwrite_output_dir: bool = field(
         default=False,
@@ -49,33 +46,63 @@ class TrainingArguments:
         },
     )
     do_train: bool = field(default=False, metadata={"help": "Whether to run training."})
-    do_eval: bool = field(default=False, metadata={"help": "Whether to run eval on the dev set."})
-    per_device_train_batch_size: int = field(
-        default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for training."}
+    do_eval: bool = field(
+        default=False, metadata={"help": "Whether to run eval on the dev set."}
     )
-    per_device_eval_batch_size: int = field(
-        default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for evaluation."}
+    commitment_cost: float = field(default=0.25, metadata={"help": "Commitment cost"})
+    learning_rate: float = field(
+        default=5e-5, metadata={"help": "The initial learning rate for AdamW."}
     )
-    commitment_cost: float = field(default=0.25 , metadata={"help": "Commitment cost"})
-    learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate for AdamW."})
-    weight_decay: float = field(default=0.0, metadata={"help": "Weight decay for AdamW if we apply some."})
-    adam_beta1: float = field(default=0.9, metadata={"help": "Beta1 for AdamW optimizer"})
-    adam_beta2: float = field(default=0.999, metadata={"help": "Beta2 for AdamW optimizer"})
-    adam_epsilon: float = field(default=1e-8, metadata={"help": "Epsilon for AdamW optimizer."})
-    adafactor: bool = field(default=False, metadata={"help": "Whether or not to replace AdamW by Adafactor."})
-    num_train_epochs: float = field(default=3.0, metadata={"help": "Total number of training epochs to perform."})
-    warmup_steps: int = field(default=0, metadata={"help": "Linear warmup over warmup_steps."})
-    logging_steps: int = field(default=500, metadata={"help": "Log every X updates steps."})
-    save_steps: int = field(default=500, metadata={"help": "Save checkpoint every X updates steps."})
-    eval_steps: int = field(default=None, metadata={"help": "Run an evaluation every X steps."})
-    seed: int = field(default=42, metadata={"help": "Random seed that will be set at the beginning of training."})
+    weight_decay: float = field(
+        default=0.0, metadata={"help": "Weight decay for AdamW if we apply some."}
+    )
+    adam_beta1: float = field(
+        default=0.9, metadata={"help": "Beta1 for AdamW optimizer"}
+    )
+    adam_beta2: float = field(
+        default=0.999, metadata={"help": "Beta2 for AdamW optimizer"}
+    )
+    adam_epsilon: float = field(
+        default=1e-8, metadata={"help": "Epsilon for AdamW optimizer."}
+    )
+    adafactor: bool = field(
+        default=False,
+        metadata={"help": "Whether or not to replace AdamW by Adafactor."},
+    )
+    num_train_epochs: float = field(
+        default=3.0, metadata={"help": "Total number of training epochs to perform."}
+    )
+    warmup_steps: int = field(
+        default=500, metadata={"help": "Linear warmup over warmup_steps."}
+    )
+    logging_steps: int = field(
+        default=20, metadata={"help": "Log every X updates steps."}
+    )
+    save_steps: int = field(
+        default=500, metadata={"help": "Save checkpoint every X updates steps."}
+    )
+    eval_steps: int = field(
+        default=None, metadata={"help": "Run an evaluation every X steps."}
+    )
+    seed: int = field(
+        default=42,
+        metadata={"help": "Random seed that will be set at the beginning of training."},
+    )
     push_to_hub: bool = field(
-        default=False, metadata={"help": "Whether or not to upload the trained model to the model hub after training."}
+        default=False,
+        metadata={
+            "help": "Whether or not to upload the trained model to the model hub after training."
+        },
     )
     hub_model_id: str = field(
-        default=None, metadata={"help": "The name of the repository to keep in sync with the local `output_dir`."}
+        default=None,
+        metadata={
+            "help": "The name of the repository to keep in sync with the local `output_dir`."
+        },
     )
-    hub_token: str = field(default=None, metadata={"help": "The token to use to push to the Model Hub."})
+    hub_token: str = field(
+        default=None, metadata={"help": "The token to use to push to the Model Hub."}
+    )
 
     def __post_init__(self):
         if self.output_dir is not None:
@@ -112,10 +139,16 @@ class ModelArguments:
         },
     )
     config_name: Optional[str] = field(
-        default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
+        default=None,
+        metadata={
+            "help": "Pretrained config name or path if not the same as model_name"
+        },
     )
     cache_dir: Optional[str] = field(
-        default=None, metadata={"help": "Where do you want to store the pretrained models downloaded from s3"}
+        default=None,
+        metadata={
+            "help": "Where do you want to store the pretrained models downloaded from s3"
+        },
     )
     dtype: Optional[str] = field(
         default="float32",
@@ -143,67 +176,66 @@ class DataTrainingArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
-    dataset: str = field(
-        metadata={"help": "Path to the root training directory which contains one subdirectory per class."}
-    )
-    image_size: Optional[int] = field(default=224, metadata={"help": " The size (resolution) of each image."})
-    max_train_samples: Optional[int] = field(
-        default=None,
+    train_folder: str = field(
         metadata={
-            "help": (
-                "For debugging purposes or quicker training, truncate the number of training examples to this "
-                "value if set."
-            )
-        },
+            "help": "Path to the root training directory which contains tfrecords."
+        }
     )
-    max_eval_samples: Optional[int] = field(
-        default=None,
+    valid_folder: str = field(
         metadata={
-            "help": (
-                "For debugging purposes or quicker training, truncate the number of evaluation examples to this "
-                "value if set."
-            )
-        },
+            "help": "Path to the root validation directory which contains tfrecords."
+        }
     )
-    overwrite_cache: bool = field(
-        default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
+    batch_size: Optional[int] = field(
+        default=64, metadata={"help": "Batch size for training."}
     )
-    preprocessing_num_workers: Optional[int] = field(
+    image_size: Optional[int] = field(
+        default=256, metadata={"help": " The size (resolution) of each image."}
+    )
+    seed_dataset: Optional[int] = field(
         default=None,
-        metadata={"help": "The number of processes to use for the preprocessing."},
+        metadata={"help": "The seed used to augment the dataset."},
+    )
+    format: Optional[str] = field(
+        default="rgb", metadata={"help": "The format of the images (rgb or lab)."}
     )
 
 
 class TrainState(train_state.TrainState):
-    dropout_rng: jnp.ndarray
+    dropout_rng: jnp.ndarray = None
 
     def replicate(self):
-        return jax_utils.replicate(self).replace(dropout_rng=shard_prng_key(self.dropout_rng))
+        return jax_utils.replicate(self).replace(
+            dropout_rng=shard_prng_key(self.dropout_rng)
+        )
 
 
 def create_learning_rate_fn(
-    train_ds_size: int, train_batch_size: int, num_train_epochs: int, num_warmup_steps: int, learning_rate: float
+    num_warmup_steps: int,
+    learning_rate: float,
 ) -> Callable[[int], jnp.array]:
-    """Returns a linear warmup, linear_decay learning rate function."""
-    steps_per_epoch = train_ds_size // train_batch_size
-    num_train_steps = steps_per_epoch * num_train_epochs
-    warmup_fn = optax.linear_schedule(init_value=0.0, end_value=learning_rate, transition_steps=num_warmup_steps)
-    decay_fn = optax.linear_schedule(
-        init_value=learning_rate, end_value=0, transition_steps=num_train_steps - num_warmup_steps
+    """Returns the learning rate function."""
+    warmup_fn = optax.linear_schedule(
+        init_value=0.0, end_value=learning_rate, transition_steps=num_warmup_steps + 1
     )
-    schedule_fn = optax.join_schedules(schedules=[warmup_fn, decay_fn], boundaries=[num_warmup_steps])
-    return schedule_fn
+    return warmup_fn
+
+
+assert jax.local_device_count() == 8
 
 
 def main():
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
+    parser = HfArgumentParser(
+        (ModelArguments, DataTrainingArguments, TrainingArguments)
+    )
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, training_args = parser.parse_json_file(
+            json_file=os.path.abspath(sys.argv[1])
+        )
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
 
     if (
         os.path.exists(training_args.output_dir)
@@ -239,33 +271,15 @@ def main():
     if training_args.push_to_hub:
         if training_args.hub_model_id is None:
             repo_name = get_full_repo_name(
-                Path(training_args.output_dir).absolute().name, token=training_args.hub_token
+                Path(training_args.output_dir).absolute().name,
+                token=training_args.hub_token,
             )
         else:
             repo_name = training_args.hub_model_id
         repo = Repository(training_args.output_dir, clone_from=repo_name)
 
     # Initialize datasets and pre-processing transforms
-    # We use torchvision here for faster pre-processing
-    # Note that here we are using some default pre-processing, for maximum accuray
-    # one should tune this part and carefully select what transformations to use.
-    augmentations = transforms.Compose(
-        [
-            transforms.Resize(data_args.image_size, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(data_args.image_size),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Lambda(lambda x: x * 2 - 1),
-            transforms.Lambda(lambda x: x.permute(1, 2, 0)),
-        ]
-    )
-    train_dataset = load_dataset(data_args.dataset, split="train")
-
-    def transform(examples):
-        images = [augmentations(image.convert("RGB")) for image in examples["image"]]
-        return {"input": images}
-
-    train_dataset.set_transform(transform)
+    dataset = Dataset(**asdict(data_args))
 
     # Load pretrained model and tokenizer
     config = ViTVQConfig.from_pretrained(
@@ -275,7 +289,7 @@ def main():
         cache_dir=model_args.cache_dir,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-    
+
     model = ViTVQModel(
         config,
         seed=training_args.seed,
@@ -284,46 +298,22 @@ def main():
 
     # Store some constant
     num_epochs = int(training_args.num_train_epochs)
-    train_batch_size = int(training_args.per_device_train_batch_size) * jax.device_count()
-    eval_batch_size = int(training_args.per_device_eval_batch_size) * jax.device_count()
-    steps_per_epoch = len(train_dataset) // train_batch_size
-    total_train_steps = steps_per_epoch * num_epochs
-
-    def collate_fn(examples):
-        inputs = torch.stack([example["input"] for example in examples])
-
-        batch = {"input": inputs}
-        batch = {k: v.numpy() for k, v in batch.items()}
-
-        return batch
-    
-    # Create data loaders
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=train_batch_size,
-        shuffle=True,
-        num_workers=data_args.preprocessing_num_workers,
-        persistent_workers=True,
-        drop_last=True,
-        collate_fn=collate_fn,
-    )
+    train_batch_size = int(data_args.batch_size) * jax.device_count()
+    eval_batch_size = train_batch_size
 
     # Initialize our training
     rng = jax.random.PRNGKey(training_args.seed)
     rng, dropout_rng = jax.random.split(rng)
 
     # Create learning rate schedule
-    linear_decay_lr_schedule_fn = create_learning_rate_fn(
-        len(train_dataset),
-        train_batch_size,
-        training_args.num_train_epochs,
+    lr_schedule_fn = create_learning_rate_fn(
         training_args.warmup_steps,
         training_args.learning_rate,
     )
 
     # create adam optimizer
     adamw = optax.adamw(
-        learning_rate=linear_decay_lr_schedule_fn,
+        learning_rate=lr_schedule_fn,
         b1=training_args.adam_beta1,
         b2=training_args.adam_beta2,
         eps=training_args.adam_epsilon,
@@ -332,30 +322,43 @@ def main():
 
     # Setup train state
     state = TrainState.create(
-        apply_fn=model.__call__,
-        params=model.params,
-        tx=adamw,
-        dropout_rng=dropout_rng
+        apply_fn=model.__call__, params=model.params, tx=adamw, dropout_rng=dropout_rng
     )
-
 
     # Define gradient update step fn
     def train_step(state, batch):
         dropout_rng, new_dropout_rng = jax.random.split(state.dropout_rng)
 
         def compute_loss(params):
-            predicted_images, codebook_loss = state.apply_fn(batch["input"], params=params, dropout_rng=dropout_rng, train=True)
-            recon_loss = jnp.mean((predicted_images - batch["input"]) ** 2)
-            loss = recon_loss + codebook_loss
-            return loss
+            predicted_images, (q_latent_loss, e_latent_loss) = state.apply_fn(
+                batch, params=params, dropout_rng=dropout_rng, train=True
+            )
+            loss_l1 = jnp.mean(jnp.abs(predicted_images - batch))
+            loss_l2 = jnp.mean((predicted_images - batch) ** 2)
+            loss = (
+                model.config.cost_l1 * loss_l1
+                + model.config.cost_l2 * loss_l2
+                + +model.config.cost_q_latent * q_latent_loss
+                + model.config.cost_e_latent * e_latent_loss
+            )
+            return loss, {
+                "loss_l1": model.config.cost_recon * loss_l1,
+                "loss_l2": model.config.cost_recon * loss_l2,
+                "loss_q_latent": model.config.cost_q_latent * q_latent_loss,
+                "loss_e_latent": model.config.cost_e_latent * e_latent_loss,
+            }
 
-        grad_fn = jax.value_and_grad(compute_loss)
-        loss, grad = grad_fn(state.params)
+        grad_fn = jax.value_and_grad(compute_loss, has_aux=True)
+        (loss, loss_details), grad = grad_fn(state.params)
         grad = jax.lax.pmean(grad, "batch")
 
         new_state = state.apply_gradients(grads=grad, dropout_rng=new_dropout_rng)
 
-        metrics = {"loss": loss, "learning_rate": linear_decay_lr_schedule_fn(state.step)}
+        metrics = {
+            "loss": loss,
+            "learning_rate": lr_schedule_fn(state.step),
+            **loss_details,
+        }
         metrics = jax.lax.pmean(metrics, axis_name="batch")
 
         return new_state, metrics
@@ -367,30 +370,33 @@ def main():
     state = state.replicate()
 
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num Epochs = {num_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {training_args.per_device_train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel & distributed) = {train_batch_size}")
-    logger.info(f"  Total optimization steps = {total_train_steps}")
+    logger.info(f"  Total batch size = {data_args.batch_size}")
 
     train_time = 0
     epochs = tqdm(range(num_epochs), desc=f"Epoch ... (1/{num_epochs})", position=0)
+
+    wandb.init(config=parser.parse_args())
     for epoch in epochs:
         # ======================== Training ================================
         train_start = time.time()
 
-        train_metrics = []
+        train_step_progress_bar = tqdm(desc="Training...", position=1, leave=False)
 
-        steps_per_epoch = len(train_dataset) // train_batch_size
-        train_step_progress_bar = tqdm(total=steps_per_epoch, desc="Training...", position=1, leave=False)
-        
         # train
-        for batch in train_loader:
+        for i, batch in enumerate(dataset.train.as_numpy_iterator()):
             batch = shard(batch)
             state, train_metric = p_train_step(state, batch)
-            train_metrics.append(train_metric)
-
             train_step_progress_bar.update(1)
+
+            if jax.process_index() == 0:
+                if i % training_args.logging_steps == 0:
+                    metrics = unreplicate(train_metric)
+                    wandb.log(metrics)
+
+                if i % training_args.save_steps == 0:
+                    params = jax.device_get(jax.tree_map(lambda x: x[0], state.params))
+                    model.save_pretrained(training_args.output_dir, params=params)
 
         train_time += time.time() - train_start
 
@@ -403,11 +409,14 @@ def main():
         )
 
         # save checkpoint after each epoch and push checkpoint to the hub
-        if jax.process_index() == 0 and ((epoch + 1)  % 10 == 0):
+        if jax.process_index() == 0 and ((epoch + 1) % 10 == 0):
             params = jax.device_get(jax.tree_map(lambda x: x[0], state.params))
             model.save_pretrained(training_args.output_dir, params=params)
             if training_args.push_to_hub:
-                repo.push_to_hub(commit_message=f"Saving weights and logs of epoch {epoch}", blocking=False)
+                repo.push_to_hub(
+                    commit_message=f"Saving weights and logs of epoch {epoch}",
+                    blocking=False,
+                )
 
 
 if __name__ == "__main__":
