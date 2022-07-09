@@ -332,7 +332,6 @@ class VectorQuantizer(nn.Module):
             (self.config.n_embed, self.config.codebook_embed_dim),
             self.dtype,
         )
-        self.beta = self.config.commitment_cost
 
     def __call__(self, hidden_states):
         """
@@ -367,14 +366,13 @@ class VectorQuantizer(nn.Module):
         hidden_states_normed = l2_normalize(hidden_states, axis=-1)
         e_latent_loss = jnp.mean(jnp.square(jax.lax.stop_gradient(z_q) - hidden_states_normed))
         q_latent_loss = jnp.mean(jnp.square(z_q - jax.lax.stop_gradient(hidden_states_normed)))
-        loss = q_latent_loss + self.beta * e_latent_loss
 
         # Straight Through Estimator
         z_q = hidden_states + jax.lax.stop_gradient(z_q - hidden_states)
 
-        return z_q, min_encoding_indices, loss
+        return z_q, min_encoding_indices, (q_latent_loss, e_latent_loss)
 
-    def get_codebook_entry(self, indices, shape=None):
+    def get_codebook_entry(self, indices):
         # indices are expected to be of shape (batch, num_tokens)
         # get quantized latent vectors
         z_q = jnp.take(self.embedding, indices, axis=0)
@@ -459,7 +457,7 @@ class VitVQModule(nn.Module):
         # 2. Project the embeddings to the codebook embedding space and quantize
         # this corresponds to the factorized codebook from the paper https://arxiv.org/abs/2110.04627 section 3.2
         hidden_states = self.factor_in(hidden_states, deterministic=deterministic)
-        hidden_states, _, loss = self.quantizer(hidden_states)
+        hidden_states, _, losses = self.quantizer(hidden_states)
 
         # 3. Project the quantized embeddings back to the original space
         hidden_states = self.factor_out(hidden_states)
@@ -476,7 +474,7 @@ class VitVQModule(nn.Module):
             patches = self.to_patches(hidden_states)
             pixel_values = to_image(patches, self.config.patch_size)
 
-        return pixel_values, loss
+        return pixel_values, losses
 
 
 class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):

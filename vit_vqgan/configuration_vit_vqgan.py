@@ -11,7 +11,9 @@ class ViTVQConfig(PretrainedConfig):
         # of values. It mostly depends on the scale of the reconstruction cost
         # (log p(x|z)). So if the reconstruction cost is 100x higher, the
         # commitment_cost should also be multiplied with the same amount.
-        commitment_cost=0.25,
+        cost_recon=1.0,
+        cost_q_latent=1.0,
+        cost_e_latent=0.25,
         intermediate_size=768 * 4,
         num_hidden_layers=12,
         num_attention_heads=12,
@@ -34,10 +36,12 @@ class ViTVQConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
 
+        self.cost_recon = cost_recon
+        self.cost_q_latent = cost_q_latent
+        self.cost_e_latent = cost_e_latent
         self.hidden_size = hidden_size
         self.codebook_embed_dim = codebook_embed_dim
         self.n_embed = n_embed
-        self.commitment_cost = commitment_cost
         self.intermediate_size = intermediate_size
         self.dropout = dropout
         self.num_hidden_layers = num_hidden_layers
