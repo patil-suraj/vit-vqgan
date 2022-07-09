@@ -342,8 +342,8 @@ def main():
                 + model.config.cost_e_latent * e_latent_loss
             )
             return loss, {
-                "loss_l1": model.config.cost_recon * loss_l1,
-                "loss_l2": model.config.cost_recon * loss_l2,
+                "loss_l1": model.config.cost_l1 * loss_l1,
+                "loss_l2": model.config.cost_l2 * loss_l2,
                 "loss_q_latent": model.config.cost_q_latent * q_latent_loss,
                 "loss_e_latent": model.config.cost_e_latent * e_latent_loss,
             }
