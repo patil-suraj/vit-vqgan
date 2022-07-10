@@ -19,6 +19,7 @@ from flax.jax_utils import unreplicate
 from flax.training import train_state
 from flax.training.common_utils import shard, shard_prng_key
 from huggingface_hub import Repository
+from lpips_j.lpips import LPIPS
 from tqdm import tqdm
 from transformers import HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
@@ -244,6 +245,13 @@ def flat_args(model_args, data_args, training_args):
     return args
 
 
+def init_lpips(rng, data_args):
+    x = jax.random.normal(rng, shape=(1, data_args.image_size, data_args.image_size, 3))
+    lpips = LPIPS()
+    lpips_params = lpips.init(rng, x, x)
+    return lpips, lpips_params
+
+
 assert jax.local_device_count() == 8
 
 
@@ -341,6 +349,9 @@ def main():
         apply_fn=model.__call__, params=model.params, tx=adamw, dropout_rng=dropout_rng
     )
 
+    # Should we replicate these params?
+    lpips, lpips_params = init_lpips(rng, data_args)
+
     # Define gradient update step fn
     def train_step(state, batch):
         dropout_rng, new_dropout_rng = jax.random.split(state.dropout_rng)
@@ -351,17 +362,20 @@ def main():
             )
             loss_l1 = jnp.mean(jnp.abs(predicted_images - batch))
             loss_l2 = jnp.mean((predicted_images - batch) ** 2)
+            loss_lpips = jnp.mean(lpips.apply(lpips_params, batch, predicted_images))
             loss = (
                 model.config.cost_l1 * loss_l1
                 + model.config.cost_l2 * loss_l2
-                + +model.config.cost_q_latent * q_latent_loss
+                + model.config.cost_q_latent * q_latent_loss
                 + model.config.cost_e_latent * e_latent_loss
+                + model.config.cost_lpips * loss_lpips
             )
             return loss, {
                 "loss_l1": model.config.cost_l1 * loss_l1,
                 "loss_l2": model.config.cost_l2 * loss_l2,
                 "loss_q_latent": model.config.cost_q_latent * q_latent_loss,
                 "loss_e_latent": model.config.cost_e_latent * e_latent_loss,
+                "loss_lpips": model.config.cost_lpips * loss_lpips,
             }
 
         grad_fn = jax.value_and_grad(compute_loss, has_aux=True)

@@ -15,6 +15,7 @@ class ViTVQConfig(PretrainedConfig):
         cost_l2=1.0,
         cost_q_latent=1.0,
         cost_e_latent=0.25,
+        cost_lpips=0.1,
         intermediate_size=768 * 4,
         num_hidden_layers=12,
         num_attention_heads=12,
@@ -41,6 +42,7 @@ class ViTVQConfig(PretrainedConfig):
         self.cost_l2 = cost_l2
         self.cost_q_latent = cost_q_latent
         self.cost_e_latent = cost_e_latent
+        self.cost_lpips = cost_lpips
         self.hidden_size = hidden_size
         self.codebook_embed_dim = codebook_embed_dim
         self.n_embed = n_embed
