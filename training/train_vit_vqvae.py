@@ -237,6 +237,13 @@ def get_config(model_args, data_args, training_args):
     )
 
 
+def flat_args(model_args, data_args, training_args):
+    args = asdict(model_args)
+    args.update(asdict(data_args))
+    args.update(asdict(training_args))
+    return args
+
+
 assert jax.local_device_count() == 8
 
 
@@ -385,7 +392,7 @@ def main():
     train_time = 0
     epochs = tqdm(range(num_epochs), desc=f"Epoch ... (1/{num_epochs})", position=0)
 
-    wandb.init(config=parser.parse_args())
+    wandb.init(config=flat_args(model_args, data_args, training_args))
     for epoch in epochs:
         # ======================== Training ================================
         train_start = time.time()
