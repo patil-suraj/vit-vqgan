@@ -221,6 +221,22 @@ def create_learning_rate_fn(
     return warmup_fn
 
 
+def get_config(model_args, data_args, training_args):
+    if model_args.config_name is None:
+        return ViTVQConfig(
+            image_size=data_args.image_size,
+            commitment_cost=training_args.commitment_cost,
+            cache_dir=model_args.cache_dir,
+        )
+    return ViTVQConfig.from_pretrained(
+        model_args.config_name,
+        image_size=data_args.image_size,
+        commitment_cost=training_args.commitment_cost,
+        cache_dir=model_args.cache_dir,
+        use_auth_token=True if model_args.use_auth_token else None,
+    )
+
+
 assert jax.local_device_count() == 8
 
 
@@ -281,15 +297,8 @@ def main():
     # Initialize datasets and pre-processing transforms
     dataset = Dataset(**asdict(data_args))
 
-    # Load pretrained model and tokenizer
-    config = ViTVQConfig.from_pretrained(
-        model_args.config_name,
-        image_size=data_args.image_size,
-        commitment_cost=training_args.commitment_cost,
-        cache_dir=model_args.cache_dir,
-        use_auth_token=True if model_args.use_auth_token else None,
-    )
-
+    # Load or create model
+    config = get_config(model_args, data_args, training_args)
     model = ViTVQModel(
         config,
         seed=training_args.seed,
