@@ -16,5 +16,5 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=setuptools.find_packages(),
-    install_requires=["jax>=0.2.6", "flax", "transformers"],
+    install_requires=["jax>=0.2.6", "flax", "transformers", "lpips-j"],
 )
