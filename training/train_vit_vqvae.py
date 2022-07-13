@@ -7,12 +7,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
 import wandb
-
 import jax
 import jax.numpy as jnp
+from jax.experimental.compilation_cache import compilation_cache as cc
 import optax
-
-# for dataset and preprocessing
 import transformers
 from flax import jax_utils
 from flax.jax_utils import unreplicate
@@ -23,9 +21,10 @@ from lpips_j.lpips import LPIPS
 from tqdm import tqdm
 from transformers import HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
-
 from vit_vqgan import ViTVQConfig, ViTVQModel
 from vit_vqgan.data import Dataset
+
+cc.initialize_cache("./jax_cache", max_cache_size_bytes=10 * 2**30)
 
 logger = logging.getLogger(__name__)
 
