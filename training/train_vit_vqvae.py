@@ -23,8 +23,9 @@ from transformers import HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
 from vit_vqgan import ViTVQConfig, ViTVQModel
 from vit_vqgan.data import Dataset
+import tempfile
 
-cc.initialize_cache("./jax_cache", max_cache_size_bytes=10 * 2**30)
+cc.initialize_cache("./jax_cache", max_cache_size_bytes=5 * 2**30)
 
 logger = logging.getLogger(__name__)
 
@@ -49,25 +50,71 @@ class TrainingArguments:
     do_eval: bool = field(
         default=False, metadata={"help": "Whether to run eval on the dev set."}
     )
-    commitment_cost: float = field(default=0.25, metadata={"help": "Commitment cost"})
+
+    gradient_accumulation_steps: int = field(
+        default=1,
+        metadata={
+            "help": "Number of updates steps to accumulate before performing an update pass."
+        },
+    )
+    gradient_checkpointing: bool = field(
+        default=False, metadata={"help": "Use gradient checkpointing."}
+    )
     learning_rate: float = field(
-        default=5e-5, metadata={"help": "The initial learning rate for AdamW."}
+        default=5e-5, metadata={"help": "The initial learning rate."}
+    )
+    optim: str = field(
+        default="distributed_shampoo",
+        metadata={
+            "help": 'The optimizer to use. Can be "distributed_shampoo" (default) or "adam"'
+        },
     )
     weight_decay: float = field(
-        default=0.0, metadata={"help": "Weight decay for AdamW if we apply some."}
+        default=0.0, metadata={"help": "Weight decay applied to parameters."}
     )
-    adam_beta1: float = field(
-        default=0.9, metadata={"help": "Beta1 for AdamW optimizer"}
+    beta1: float = field(
+        default=0.9,
+        metadata={"help": "Beta1 for Adam & Distributed Shampoo."},
     )
-    adam_beta2: float = field(
-        default=0.999, metadata={"help": "Beta2 for AdamW optimizer"}
+    beta2: float = field(
+        default=0.999,
+        metadata={"help": "Beta2 for for Adam & Distributed Shampoo."},
     )
     adam_epsilon: float = field(
         default=1e-8, metadata={"help": "Epsilon for AdamW optimizer."}
     )
-    adafactor: bool = field(
+    block_size: int = field(
+        default=1024,
+        metadata={"help": "Chunked size for large layers with Distributed Shampoo."},
+    )
+    preconditioning_compute_steps: int = field(
+        default=10, metadata={"help": "Number of steps to update preconditioner."}
+    )
+    skip_preconditioning_dim_size_gt: int = field(
+        default=4096,
+        metadata={"help": "Max size for preconditioning with Distributed Shampoo."},
+    )
+    graft_type: str = field(
+        default="rmsprop_normalized",
+        metadata={
+            "help": "The type of grafting to use. Can be 'rmsprop_normalized' (default), 'rmsprop', 'adagrad', 'adagrad_normalized', 'sgd' or 'sqrt_n'"
+        },
+    )
+    nesterov: bool = field(
         default=False,
-        metadata={"help": "Whether or not to replace AdamW by Adafactor."},
+        metadata={"help": "Use Nesterov momentum for Distributed Shampoo."},
+    )
+    optim_quantized: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to quantize optimizer (only supported with Distributed Shampoo)."
+        },
+    )
+    shard_shampoo_across: str = field(
+        default="dp",
+        metadata={
+            "help": "Whether to shard the optimizer across data devices (dp), model devices (mp) or both (2d)."
+        },
     )
     num_train_epochs: float = field(
         default=3.0, metadata={"help": "Total number of training epochs to perform."}
@@ -75,19 +122,68 @@ class TrainingArguments:
     warmup_steps: int = field(
         default=500, metadata={"help": "Linear warmup over warmup_steps."}
     )
-    logging_steps: int = field(
-        default=20, metadata={"help": "Log every X updates steps."}
+    lr_decay: str = field(
+        default=None,
+        metadata={
+            "help": "Decay to be used in the learning rate scheduler. Can be None (default), linear or exponential."
+        },
     )
-    save_steps: int = field(
-        default=500, metadata={"help": "Save checkpoint every X updates steps."}
+    lr_transition_steps: int = field(
+        default=None,
+        metadata={
+            "help": "Number of transition steps associated with learning rate decay when using exponential decay."
+        },
+    )
+    lr_decay_rate: float = field(
+        default=None,
+        metadata={
+            "help": "Decay rate associated with learning rate when using exponential decay."
+        },
+    )
+    lr_staircase: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to use staircase or continuous learning rate when using exponential decay."
+        },
+    )
+    lr_offset: int = field(
+        default=0,
+        metadata={"help": "Number of steps to offset learning rate and keep it at 0."},
+    )
+    logging_steps: int = field(
+        default=40, metadata={"help": "Log every X updates steps."}
     )
     eval_steps: int = field(
-        default=None, metadata={"help": "Run an evaluation every X steps."}
+        default=400, metadata={"help": "Run an evaluation every X steps."}
     )
-    seed: int = field(
+    save_steps: int = field(
+        default=4000, metadata={"help": "Save checkpoint every X updates steps."}
+    )
+    log_model: bool = field(
+        default=False,
+        metadata={"help": "Log model to wandb at `save_steps` frequency."},
+    )
+
+    seed_model: int = field(
         default=42,
-        metadata={"help": "Random seed that will be set at the beginning of training."},
+        metadata={
+            "help": "Random seed for the model that will be set at the beginning of training."
+        },
     )
+
+    wandb_entity: Optional[str] = field(
+        default=None,
+        metadata={"help": "The wandb entity to use (for teams)."},
+    )
+    wandb_project: str = field(
+        default="vit-vqgan",
+        metadata={"help": "The name of the wandb project."},
+    )
+    wandb_job_type: str = field(
+        default="train",
+        metadata={"help": "The name of the wandb job type."},
+    )
+
     push_to_hub: bool = field(
         default=False,
         metadata={
@@ -104,9 +200,74 @@ class TrainingArguments:
         default=None, metadata={"help": "The token to use to push to the Model Hub."}
     )
 
+    assert_TPU_available: bool = field(
+        default=False,
+        metadata={"help": "Verify that TPU is not in use."},
+    )
+
+    use_vmap_trick: bool = field(
+        default=True,
+        metadata={"help": "Optimization trick that should lead to faster training."},
+    )
+
+    mp_devices: Optional[int] = field(
+        default=1,
+        metadata={
+            "help": "Number of devices required for model parallelism. The other dimension of available devices is used for data parallelism."
+        },
+    )
+
+    dp_devices: int = field(init=False)
+
     def __post_init__(self):
+        if self.assert_TPU_available:
+            assert (
+                jax.local_device_count() == 8
+            ), "TPUs in use, please check running processes"
         if self.output_dir is not None:
             self.output_dir = os.path.expanduser(self.output_dir)
+        if (
+            os.path.exists(self.output_dir)
+            and os.listdir(self.output_dir)
+            and self.do_train
+            and not self.overwrite_output_dir
+        ):
+            raise ValueError(
+                f"Output directory ({self.output_dir}) already exists and is not empty."
+                "Use --overwrite_output_dir to overcome."
+            )
+        assert self.lr_decay in [
+            None,
+            "linear",
+            "exponential",
+        ], f"Selected learning rate decay not supported: {self.lr_decay}"
+        if not self.do_train:
+            # eval only
+            self.num_train_epochs = 1
+        assert self.optim in [
+            "distributed_shampoo",
+            "adam",
+        ], f"Unknown optimizer {self.optim}"
+        assert self.graft_type in [
+            "rmsprop_normalized",
+            "rmsprop",
+            "adagrad",
+            "adagrad_normalized",
+            "sgd",
+            "sqrt_n",
+        ], f"Selected graft type not supported: {self.graft_type}"
+        assert self.shard_shampoo_across in [
+            "dp",
+            "mp",
+            "2d",
+        ], f"Shard shampoo across {self.shard_shampoo_across} not supported."
+        assert (
+            self.mp_devices > 0
+        ), f"Number of devices for model parallelism must be > 0"
+        assert (
+            jax.device_count() % self.mp_devices == 0
+        ), f"Number of available devices ({jax.device_count()} must be divisible by number of devices used for model parallelism ({self.mp_devices})."
+        self.dp_devices = jax.device_count() // self.mp_devices
 
     def to_dict(self):
         """
@@ -168,6 +329,39 @@ class ModelArguments:
             )
         },
     )
+    restore_state: Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": "Restore optimizer and training state. Can be True (will retrieve associated wandb artifact) or a local directory."
+        },
+    )
+
+    def get_metadata(self):
+        if self.model_name_or_path is not None and ":" in self.model_name_or_path:
+            if jax.process_index() == 0:
+                artifact = wandb.run.use_artifact(self.model_name_or_path)
+            else:
+                artifact = wandb.Api().artifact(self.model_name_or_path)
+            return artifact.metadata
+        else:
+            return dict()
+
+    def get_opt_state(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:  # avoid multiple artifact copies
+            if self.restore_state is True:
+                # wandb artifact
+                state_artifact = self.model_name_or_path.replace(
+                    "/model-", "/state-", 1
+                )
+                if jax.process_index() == 0:
+                    artifact = wandb.run.use_artifact(state_artifact)
+                else:
+                    artifact = wandb.Api().artifact(state_artifact)
+                artifact_dir = artifact.download(tmp_dir)
+                self.restore_state = str(Path(artifact_dir) / "opt_state.msgpack")
+
+            with Path(self.restore_state).open("rb") as f:
+                return f.read()
 
 
 @dataclass
@@ -191,6 +385,18 @@ class DataTrainingArguments:
     )
     image_size: Optional[int] = field(
         default=256, metadata={"help": " The size (resolution) of each image."}
+    )
+    min_original_image_size: Optional[int] = field(
+        default=512,
+        metadata={
+            "help": " The minimum size (resolution) of each original image from training set."
+        },
+    )
+    max_original_aspect_ratio: Optional[float] = field(
+        default=2.0,
+        metadata={
+            "help": " The maximum aspect ratio of each original image from training set."
+        },
     )
     seed_dataset: Optional[int] = field(
         default=None,
@@ -224,14 +430,10 @@ def create_learning_rate_fn(
 def get_config(model_args, data_args, training_args):
     if model_args.config_name is None:
         return ViTVQConfig(
-            image_size=data_args.image_size,
-            commitment_cost=training_args.commitment_cost,
             cache_dir=model_args.cache_dir,
         )
     return ViTVQConfig.from_pretrained(
         model_args.config_name,
-        image_size=data_args.image_size,
-        commitment_cost=training_args.commitment_cost,
         cache_dir=model_args.cache_dir,
         use_auth_token=True if model_args.use_auth_token else None,
     )
