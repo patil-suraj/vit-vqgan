@@ -13,8 +13,8 @@ class Dataset:
     valid_folder: str = None
     batch_size: int = 64
     image_size: int = 256
-    min_image_size = 512
-    max_aspect_ratio = 2.0
+    min_original_image_size = 512
+    max_original_aspect_ratio = 2.0
     seed_dataset: int = None
     format: str = "rgb"  # rgb or lab
     train: tf.data.Dataset = field(init=False)
@@ -51,8 +51,8 @@ class Dataset:
 
         def _filter_function(image, width, height):
             # filter out images that are too small
-            if self.min_image_size is not None and (
-                width < self.min_image_size or height < self.min_image_size
+            if self.min_original_image_size is not None and (
+                tf.minimum(width, height) < self.min_original_image_size
             ):
                 return False
             # filter out images that have wrong aspect ratio
