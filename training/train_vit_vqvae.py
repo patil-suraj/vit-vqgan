@@ -431,6 +431,7 @@ class TrainState(struct.PyTreeNode):
     lpips_params: core.FrozenDict[str, Any]
     opt_state: optax.OptState
     apply_fn: Callable = struct.field(pytree_node=False)
+    lpips_fn: Callable = struct.field(pytree_node=False)
     tx: optax.GradientTransformation = struct.field(pytree_node=False)
     dropout_rng: jnp.ndarray = None
     epoch: int = 0
@@ -449,12 +450,14 @@ class TrainState(struct.PyTreeNode):
         )
 
     @classmethod
-    def create(cls, *, apply_fn, params, tx, **kwargs):
+    def create(cls, *, apply_fn, params, lpips_fn, lpips_params, tx, **kwargs):
         opt_state = tx.init(params)
         return cls(
             step=0,
             apply_fn=apply_fn,
             params=params,
+            lpips_fn=lpips_fn,
+            lpips_params=lpips_params,
             tx=tx,
             opt_state=opt_state,
             **kwargs,
@@ -468,11 +471,11 @@ def flat_args(model_args, data_args, training_args):
     return args
 
 
-def init_lpips(rng, data_args):
-    x = jax.random.normal(rng, shape=(1, data_args.image_size, data_args.image_size, 3))
-    lpips = LPIPS()
-    lpips_params = lpips.init(rng, x, x)
-    return lpips, lpips_params
+def init_lpips(rng, image_size):
+    x = jax.random.normal(rng, shape=(1, image_size, image_size, 3))
+    lpips_fn = LPIPS()
+    lpips_params = lpips_fn.init(rng, x, x)
+    return lpips_fn, lpips_params
 
 
 assert jax.local_device_count() == 8
@@ -572,6 +575,7 @@ def main():
 
     # get PartitionSpec and shape for model params
     params_spec = None
+    lpips_spec = None
     if training_args.mp_devices > 1:
         raise NotImplementedError("Model Parallelism not implemented yet")
     params_shape = freeze(model.params_shape_tree)
@@ -796,8 +800,10 @@ def main():
         epoch=None,
         train_time=None,
         train_samples=None,
-        apply_fn=model.__call__,
-        tx=optimizer,
+        apply_fn=None,
+        lpips_params=lpips_spec,
+        lpips_fn=None,
+        tx=None,
     )
 
     # init params if not available yet
@@ -822,10 +828,13 @@ def main():
         if not model_args.restore_state:
 
             def init_state(params):
+                lpips, lpips_params = init_lpips(rng, data_args.image_size)
                 return TrainState.create(
                     apply_fn=model.__call__,
                     tx=optimizer,
                     params=maybe_init_params(params),
+                    lpips_fn=lpips,
+                    lpips_params=lpips_params,
                     dropout_rng=dropout_rng,
                     **attr_state,
                 )
@@ -844,11 +853,14 @@ def main():
             opt_state = from_bytes(opt_state_shape, model_args.get_opt_state())
 
             def restore_state(params, opt_state):
+                lpips, lpips_params = init_lpips(rng, data_args.image_size)
                 return TrainState(
                     apply_fn=model.__call__,
                     tx=optimizer,
                     params=params,
                     opt_state=opt_state,
+                    lpips_fn=lpips,
+                    lpips_params=lpips_params,
                     dropout_rng=dropout_rng,
                     **attr_state,
                 )
@@ -871,9 +883,6 @@ def main():
 
     # define batch spec
     batch_spec = PartitionSpec("dp")
-
-    # TODO: add to state
-    lpips, lpips_params = init_lpips(rng, data_args)
 
     # Define gradient update step fn
     def train_step(state, batch):
