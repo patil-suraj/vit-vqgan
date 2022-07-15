@@ -549,6 +549,7 @@ def main():
     # Set up model config
     if model_args.config_name:
         config = ViTVQConfig.from_pretrained(model_args.config_name)
+        config.gradient_checkpointing = training_args.gradient_checkpointing
     else:
         config = None
 
@@ -560,6 +561,7 @@ def main():
             seed=training_args.seed_model,
             dtype=getattr(jnp, model_args.dtype),
             _do_init=False,  # we overwrite them with loaded checkpoint
+            gradient_checkpointing=training_args.gradient_checkpointing,
         )
     else:
         model = ViTVQModel(
@@ -884,17 +886,37 @@ def main():
     # define batch spec
     batch_spec = PartitionSpec("dp")
 
-    # Define gradient update step fn
-    def train_step(state, batch):
-        dropout_rng, new_dropout_rng = jax.random.split(state.dropout_rng)
+    # "vmap trick" avoids a crash when mp_devices > 1 (not sure why it happens)
+    # lead to better perf: see https://wandb.ai/dalle-mini/dalle-mini/reports/JAX-pmap-vs-pjit--VmlldzoxNDg1ODA2
+    use_vmap_trick = training_args.use_vmap_trick
 
-        def compute_loss(params):
-            predicted_images, (q_latent_loss, e_latent_loss) = state.apply_fn(
-                batch, params=params, dropout_rng=dropout_rng, train=True
+    # make grad_param_spec for vmap
+    if use_vmap_trick:
+        grad_params_spec = jax.tree_map(
+            lambda x: PartitionSpec(*("dp",) + (x if x is not None else (None,))),
+            params_spec,
+        )
+
+    # Define gradient update step fn
+    def train_step(state, batch, train_time):
+
+        # get a minibatch (one gradient accumulation slice)
+        def get_minibatch(batch, grad_idx):
+            return jax.tree_map(
+                lambda x: jax.lax.dynamic_index_in_dim(x, grad_idx, keepdims=False),
+                batch,
             )
+
+        def compute_loss(params, minibatch, dropout_rng):
+            predicted_images, (q_latent_loss, e_latent_loss) = state.apply_fn(
+                minibatch, params=params, dropout_rng=dropout_rng, train=True
+            )
+            # TODO: replace l1 with logit laplace
             loss_l1 = jnp.mean(jnp.abs(predicted_images - batch))
             loss_l2 = jnp.mean((predicted_images - batch) ** 2)
-            loss_lpips = jnp.mean(lpips.apply(lpips_params, batch, predicted_images))
+            loss_lpips = jnp.mean(
+                state.lpips_fn.apply(state.lpips_params, batch, predicted_images)
+            )
             loss = (
                 model.config.cost_l1 * loss_l1
                 + model.config.cost_l2 * loss_l2
@@ -911,19 +933,109 @@ def main():
             }
 
         grad_fn = jax.value_and_grad(compute_loss, has_aux=True)
-        (loss, loss_details), grad = grad_fn(state.params)
-        grad = jax.lax.pmean(grad, "batch")
 
-        new_state = state.apply_gradients(grads=grad, dropout_rng=new_dropout_rng)
+        def loss_and_grad(grad_idx, dropout_rng):
+            # minibatch at grad_idx for gradient accumulation (None otherwise)
+            minibatch = (
+                get_minibatch(batch, grad_idx) if grad_idx is not None else batch
+            )
+            # ensure it is sharded properly
+            minibatch = with_sharding_constraint(minibatch, batch_spec)
+            # only 1 single rng per grad step, let us handle larger batch size (not sure why)
+            dropout_rng, _ = jax.random.split(dropout_rng)
+
+            if use_vmap_trick:
+                # "vmap trick", calculate loss and grads independently per dp_device
+                loss, grads = jax.vmap(
+                    grad_fn, in_axes=(None, 0, None), out_axes=(0, 0)
+                )(state.params, minibatch, dropout_rng)
+                # ensure they are sharded correctly
+                loss = with_sharding_constraint(loss, batch_spec)
+                grads = with_sharding_constraint(grads, grad_params_spec)
+                # average across all devices
+                # Note: we could average per device only after gradient accumulation, right before params update
+                loss, grads = jax.tree_map(lambda x: jnp.mean(x, axis=0), (loss, grads))
+            else:
+                # "vmap trick" does not work in multi-hosts and requires too much hbm
+                (loss, loss_details), grads = grad_fn(
+                    state.params, minibatch, dropout_rng
+                )
+            # ensure grads are sharded
+            grads = with_sharding_constraint(grads, params_spec)
+            # return loss and grads
+            return loss, grads, dropout_rng, loss_details
+
+        if training_args.gradient_accumulation_steps == 1:
+            loss, grads, dropout_rng, loss_details = loss_and_grad(
+                None, state.dropout_rng
+            )
+        else:
+            # create initial state for cumul_minibatch_step loop
+            init_minibatch_step = (
+                0.0,
+                with_sharding_constraint(
+                    jax.tree_map(jnp.zeros_like, state.params), params_spec
+                ),
+                state.dropout_rng,
+                {
+                    "loss_l1": 0.0,
+                    "loss_l2": 0.0,
+                    "loss_q_latent": 0.0,
+                    "loss_e_latent": 0.0,
+                    "loss_lpips": 0.0,
+                },
+            )
+
+            # accumulate gradients
+            def cumul_minibatch_step(grad_idx, cumul_loss_grad_dropout):
+                (
+                    cumul_loss,
+                    cumul_grads,
+                    dropout_rng,
+                    cumul_loss_details,
+                ) = cumul_loss_grad_dropout
+                loss, grads, dropout_rng, loss_details = loss_and_grad(
+                    grad_idx, dropout_rng
+                )
+                cumul_loss, cumul_grads, cumul_loss_details = jax.tree_map(
+                    jnp.add,
+                    (cumul_loss, cumul_grads, cumul_loss_details),
+                    (loss, grads, loss_details),
+                )
+                cumul_grads = with_sharding_constraint(cumul_grads, params_spec)
+                return cumul_loss, cumul_grads, dropout_rng, cumul_loss_details
+
+            # loop over gradients
+            loss, grads, dropout_rng, loss_details = jax.lax.fori_loop(
+                0,
+                training_args.gradient_accumulation_steps,
+                cumul_minibatch_step,
+                init_minibatch_step,
+            )
+            grads = with_sharding_constraint(grads, params_spec)
+            # sum -> mean
+            loss, grads, loss_details = jax.tree_map(
+                lambda x: x / training_args.gradient_accumulation_steps,
+                (loss, grads, loss_details),
+            )
+
+        grads = with_sharding_constraint(grads, params_spec)
+
+        # update state
+        state = state.apply_gradients(
+            grads=grads,
+            dropout_rng=dropout_rng,
+            train_time=train_time,
+            train_samples=state.train_samples + batch_size_per_step,
+        )
 
         metrics = {
             "loss": loss,
-            "learning_rate": lr_schedule_fn(state.step),
+            "learning_rate": learning_rate_fn(state.step),
             **loss_details,
         }
-        metrics = jax.lax.pmean(metrics, axis_name="batch")
 
-        return new_state, metrics
+        return state, metrics
 
     # Create parallel version of the train and eval step
     p_train_step = jax.pmap(train_step, "batch", donate_argnums=(0,))
