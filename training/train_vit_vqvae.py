@@ -1,29 +1,40 @@
+import io
 import logging
 import os
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Optional
-import wandb
+from typing import Any, Callable, NamedTuple, Optional
+
+import flax
 import jax
 import jax.numpy as jnp
-from jax.experimental.compilation_cache import compilation_cache as cc
+import jaxlib
+import numpy as np
 import optax
 import transformers
-from flax import jax_utils
+import wandb
+from flax import core, jax_utils, struct, traverse_util
+from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.jax_utils import unreplicate
+from flax.serialization import from_bytes, to_bytes
 from flax.training import train_state
-from flax.training.common_utils import shard, shard_prng_key
+from flax.training.common_utils import onehot, shard, shard_prng_key
 from huggingface_hub import Repository
+from jax.experimental import PartitionSpec, maps
+from jax.experimental.compilation_cache import compilation_cache as cc
+from jax.experimental.pjit import pjit, with_sharding_constraint
 from lpips_j.lpips import LPIPS
+from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
 from transformers import HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
+
 from vit_vqgan import ViTVQConfig, ViTVQModel
 from vit_vqgan.data import Dataset
-import tempfile
 
 cc.initialize_cache("./jax_cache", max_cache_size_bytes=5 * 2**30)
 
@@ -116,8 +127,8 @@ class TrainingArguments:
             "help": "Whether to shard the optimizer across data devices (dp), model devices (mp) or both (2d)."
         },
     )
-    num_train_epochs: float = field(
-        default=3.0, metadata={"help": "Total number of training epochs to perform."}
+    num_train_epochs: int = field(
+        default=3, metadata={"help": "Total number of training epochs to perform."}
     )
     warmup_steps: int = field(
         default=500, metadata={"help": "Linear warmup over warmup_steps."}
@@ -126,6 +137,12 @@ class TrainingArguments:
         default=None,
         metadata={
             "help": "Decay to be used in the learning rate scheduler. Can be None (default), linear or exponential."
+        },
+    )
+    num_train_steps: int = field(
+        default=None,
+        metadata={
+            "help": "Total number of training steps to perform. Required only when defining using linear learning rate decay."
         },
     )
     lr_transition_steps: int = field(
@@ -407,36 +424,41 @@ class DataTrainingArguments:
     )
 
 
-class TrainState(train_state.TrainState):
+class TrainState(struct.PyTreeNode):
+    # TODO: add separate gradients & opt_state for discriminator
+    step: int
+    params: core.FrozenDict[str, Any]
+    lpips_params: core.FrozenDict[str, Any]
+    opt_state: optax.OptState
+    apply_fn: Callable = struct.field(pytree_node=False)
+    tx: optax.GradientTransformation = struct.field(pytree_node=False)
     dropout_rng: jnp.ndarray = None
+    epoch: int = 0
+    train_time: float = 0.0  # total time the model trained
+    train_samples: int = 0  # number of samples seen
 
-    def replicate(self):
-        return jax_utils.replicate(self).replace(
-            dropout_rng=shard_prng_key(self.dropout_rng)
+    def apply_gradients(self, *, grads, **kwargs):
+
+        updates, new_opt_state = self.tx.update(grads, self.opt_state, self.params)
+        new_params = optax.apply_updates(self.params, updates)
+        return self.replace(
+            step=self.step + 1,
+            params=new_params,
+            opt_state=new_opt_state,
+            **kwargs,
         )
 
-
-def create_learning_rate_fn(
-    num_warmup_steps: int,
-    learning_rate: float,
-) -> Callable[[int], jnp.array]:
-    """Returns the learning rate function."""
-    warmup_fn = optax.linear_schedule(
-        init_value=0.0, end_value=learning_rate, transition_steps=num_warmup_steps + 1
-    )
-    return warmup_fn
-
-
-def get_config(model_args, data_args, training_args):
-    if model_args.config_name is None:
-        return ViTVQConfig(
-            cache_dir=model_args.cache_dir,
+    @classmethod
+    def create(cls, *, apply_fn, params, tx, **kwargs):
+        opt_state = tx.init(params)
+        return cls(
+            step=0,
+            apply_fn=apply_fn,
+            params=params,
+            tx=tx,
+            opt_state=opt_state,
+            **kwargs,
         )
-    return ViTVQConfig.from_pretrained(
-        model_args.config_name,
-        cache_dir=model_args.cache_dir,
-        use_auth_token=True if model_args.use_auth_token else None,
-    )
 
 
 def flat_args(model_args, data_args, training_args):
@@ -469,16 +491,11 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    if (
-        os.path.exists(training_args.output_dir)
-        and os.listdir(training_args.output_dir)
-        and training_args.do_train
-        and not training_args.overwrite_output_dir
-    ):
-        raise ValueError(
-            f"Output directory ({training_args.output_dir}) already exists and is not empty."
-            "Use --overwrite_output_dir to overcome."
-        )
+    # check arguments
+    if training_args.mp_devices > jax.local_device_count():
+        assert (
+            data_args.seed_dataset is not None
+        ), "Seed dataset must be provided when model is split over multiple hosts"
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -497,7 +514,7 @@ def main():
     logger.info(f"Training/evaluation parameters {training_args}")
 
     # set seed for random transforms and torch dataloaders
-    set_seed(training_args.seed)
+    set_seed(training_args.seed_model)
 
     # Handle the repository creation
     if training_args.push_to_hub:
@@ -513,44 +530,349 @@ def main():
     # Initialize datasets and pre-processing transforms
     dataset = Dataset(**asdict(data_args))
 
-    # Load or create model
-    config = get_config(model_args, data_args, training_args)
-    model = ViTVQModel(
-        config,
-        seed=training_args.seed,
-        dtype=getattr(jnp, model_args.dtype),
-    )
+    # Info on local devices
+    logger.info(f"Local TPUs/GPUs: {jax.local_device_count()}")
+    logger.info(f"Global TPUs/GPUs: {jax.device_count()}")
 
-    # Store some constant
-    num_epochs = int(training_args.num_train_epochs)
-    train_batch_size = int(data_args.batch_size) * jax.device_count()
-    eval_batch_size = train_batch_size
+    # Set up wandb run
+    if jax.process_index() == 0:
+        wandb.init(
+            entity=training_args.wandb_entity,
+            project=training_args.wandb_project,
+            job_type=training_args.wandb_job_type,
+            config=flat_args(model_args, data_args, training_args),
+        )
+
+    # Set up model config
+    if model_args.config_name:
+        config = ViTVQConfig.from_pretrained(model_args.config_name)
+    else:
+        config = None
+
+    # Load or create new model
+    if model_args.model_name_or_path:
+        model, params = ViTVQModel.from_pretrained(
+            model_args.model_name_or_path,
+            config=config,
+            seed=training_args.seed_model,
+            dtype=getattr(jnp, model_args.dtype),
+            _do_init=False,  # we overwrite them with loaded checkpoint
+        )
+    else:
+        model = ViTVQModel(
+            config,
+            seed=training_args.seed_model,
+            dtype=getattr(jnp, model_args.dtype),
+            _do_init=False,
+        )
+        params = None
+
+    # get model metadata
+    model_metadata = model.get_metadata()
+
+    # get PartitionSpec and shape for model params
+    params_spec = None
+    if training_args.mp_devices > 1:
+        raise NotImplementedError("Model Parallelism not implemented yet")
+    params_shape = freeze(model.params_shape_tree)
 
     # Initialize our training
-    rng = jax.random.PRNGKey(training_args.seed)
+    rng = jax.random.PRNGKey(training_args.seed_model)
     rng, dropout_rng = jax.random.split(rng)
 
+    # Store some constant
+    num_epochs = training_args.num_train_epochs
+    num_params = model.num_params(params_shape)
+
+    # batch size
+    batch_size_per_node_per_grad_step = (
+        data_args.batch_size * jax.local_device_count() // training_args.mp_devices
+    )
+    batch_size_per_node = (
+        batch_size_per_node_per_grad_step * training_args.gradient_accumulation_steps
+    )
+    batch_size_per_step = batch_size_per_node * jax.process_count()
+    eval_batch_size_per_node = (
+        data_args.batch_size * jax.local_device_count() // training_args.mp_devices
+    )
+    eval_batch_size_per_step = eval_batch_size_per_node * jax.process_count()
+
+    # log some info
+    logger.info("***** Running training *****")
+    logger.info(f"  Num Epochs = {num_epochs}")
+    logger.info(
+        f"  Batch size per dp device = {training_args.per_device_train_batch_size}"
+    )
+    logger.info(f"  Number of devices = {jax.device_count()}")
+    logger.info(
+        f"  Gradient accumulation steps = {training_args.gradient_accumulation_steps}"
+    )
+    logger.info(f"  Batch size per update = {batch_size_per_step}")
+    logger.info(f"  Model parameters = {num_params:,}")
+
+    if jax.process_index() == 0:
+        # set default x-axis as 'train/step'
+        wandb.define_metric("*", step_metric="train/step")
+
+        # add interesting config parameters
+        wandb.config.update(
+            {
+                "batch_size_per_step": batch_size_per_step,
+                "num_params": num_params,
+                "model_config": model.config.to_dict(),
+                "num_devices": jax.device_count(),
+                "versions": {
+                    "jax": jax.__version__,
+                    "jaxlib": jaxlib.__version__,
+                    "flax": flax.__version__,
+                    "optax": optax.__version__,
+                    "transformers": transformers.__version__,
+                    "wandb": wandb.__version__,
+                },
+            }
+        )
+
     # Create learning rate schedule
-    lr_schedule_fn = create_learning_rate_fn(
-        training_args.warmup_steps,
-        training_args.learning_rate,
+    def create_learning_rate_fn() -> Callable[[int], jnp.array]:
+        """Create the learning rate function."""
+        warmup_fn = optax.linear_schedule(
+            init_value=0.0,
+            end_value=training_args.learning_rate,
+            transition_steps=training_args.warmup_steps + 1,  # ensure not 0
+        )
+        last_boundary = training_args.warmup_steps
+        # offset step when resuming
+        if training_args.lr_offset:
+            warmup_fn = optax.join_schedules(
+                schedules=[optax.constant_schedule(0.0), warmup_fn],
+                boundaries=[training_args.lr_offset],
+            )
+            last_boundary += training_args.lr_offset
+        if training_args.lr_decay is None:
+            return warmup_fn
+        elif training_args.lr_decay == "linear":
+            assert (
+                training_args.num_train_steps is not None
+            ), "linear decay requires specifying explicitly num_train_steps"
+            assert (
+                training_args.num_train_steps > training_args.warmup_steps
+            ), f"linear decay requires number of training steps > warmup steps, got {training_args.num_train_steps} < {training_args.warmup_steps}"
+            decay_fn = optax.linear_schedule(
+                init_value=training_args.learning_rate,
+                end_value=0,
+                transition_steps=training_args.num_train_steps
+                - training_args.warmup_steps,
+            )
+        elif training_args.lr_decay == "exponential":
+            decay_fn = optax.exponential_decay(
+                init_value=training_args.learning_rate,
+                transition_steps=training_args.lr_transition_steps,
+                decay_rate=training_args.lr_decay_rate,
+                staircase=training_args.lr_staircase,
+            )
+        schedule_fn = optax.join_schedules(
+            schedules=[warmup_fn, decay_fn],
+            boundaries=[last_boundary],
+        )
+        return schedule_fn
+
+    learning_rate_fn = create_learning_rate_fn()
+
+    # create optimizer
+    if training_args.optim == "distributed_shampoo":
+        # parameters from https://github.com/tensorflow/lingvo/blob/03ee9d7cd50764b0424c7c863733c91fc0b053ec/lingvo/jax/optimizers.py#L729
+        graft_type = {
+            "sgd": GraftingType.SGD,
+            "adagrad": GraftingType.ADAGRAD,
+            "rmsprop": GraftingType.RMSPROP,
+            "rmsprop_normalized": GraftingType.RMSPROP_NORMALIZED,
+            "sqrt_n": GraftingType.SQRT_N,
+            "adagrad_normalized": GraftingType.ADAGRAD_NORMALIZED,
+        }[training_args.graft_type]
+        statistics_partition_spec = (
+            PartitionSpec(None, training_args.shard_shampoo_across, None)
+            if training_args.shard_shampoo_across != "2d"
+            else PartitionSpec(None, "dp", "mp")
+        )
+        opt = distributed_shampoo(
+            learning_rate_fn,
+            block_size=training_args.block_size,
+            beta1=training_args.beta1,
+            beta2=training_args.beta2,
+            diagonal_epsilon=1e-10,
+            matrix_epsilon=1e-6,
+            weight_decay=training_args.weight_decay,
+            start_preconditioning_step=max(
+                training_args.preconditioning_compute_steps + 1, 101
+            ),
+            preconditioning_compute_steps=training_args.preconditioning_compute_steps,
+            statistics_compute_steps=1,
+            best_effort_shape_interpretation=True,
+            graft_type=graft_type,
+            nesterov=training_args.nesterov,
+            exponent_override=0,
+            statistics_partition_spec=statistics_partition_spec,
+            preconditioner_partition_spec=PartitionSpec(
+                training_args.shard_shampoo_across, None, None
+            )
+            if training_args.shard_shampoo_across != "2d"
+            else PartitionSpec(
+                "mp" if training_args.mp_devices > training_args.dp_devices else "dp",
+                None,
+                None,
+            ),
+            num_devices_for_pjit=training_args.dp_devices,
+            shard_optimizer_states=True,
+            inverse_failure_threshold=0.1,
+            moving_average_for_momentum=True,
+            skip_preconditioning_dim_size_gt=training_args.skip_preconditioning_dim_size_gt,
+            clip_by_scaled_gradient_norm=None,
+            precision=jax.lax.Precision.HIGHEST,
+            best_effort_memory_usage_reduction=training_args.optim_quantized,
+        )
+        # get the real optimizer and helper functions
+        update_fn = opt.update
+        optimizer = opt.init(params_shape)
+        opt_fn = NamedTuple("opt_fn", pspec_fn=Any, shape_and_dtype_fn=Any)(
+            optimizer.pspec_fn, optimizer.shape_and_dtype_fn
+        )
+        optimizer = optax.GradientTransformation(optimizer.init_fn, update_fn)
+
+    elif training_args.optim == "adam":
+        optimizer = optax.adamw(
+            learning_rate=learning_rate_fn,
+            b1=training_args.beta1,
+            b2=training_args.beta2,
+            eps=training_args.adam_epsilon,
+            weight_decay=training_args.weight_decay,
+        )
+
+    # get PartitionSpec and shape of optimizer state
+    def get_opt_state_spec_and_shape():
+        # get opt_state shape without actual init
+        opt_state_shape = jax.eval_shape(optimizer.init, params_shape)
+        # get PartitionSpec
+        if training_args.optim == "adam":
+
+            def _opt_state_spec_per_leaf(x, spec):
+                if isinstance(x, FrozenDict):
+                    # variables with same structure as params
+                    return spec
+                else:
+                    # other variables such as count
+                    return None
+
+            opt_state_spec = jax.tree_map(
+                _opt_state_spec_per_leaf,
+                opt_state_shape,
+                params_spec,
+                # return None spec for empty elements
+                is_leaf=lambda x: isinstance(x, (FrozenDict, optax.EmptyState)),
+            )
+        elif training_args.optim == "distributed_shampoo":
+            opt_state_spec = opt_fn.pspec_fn(
+                params_shape,
+                params_spec,
+                statistics_partition_spec,
+            )
+        else:
+            raise NotImplementedError
+        return freeze(opt_state_spec), freeze(opt_state_shape)
+
+    opt_state_spec, opt_state_shape = get_opt_state_spec_and_shape()
+
+    # create a mesh
+    mesh_shape = (training_args.dp_devices, training_args.mp_devices)
+    devices = np.asarray(jax.devices()).reshape(*mesh_shape)
+    mesh = maps.Mesh(devices, ("dp", "mp"))
+    logger.info(f"  Mesh shape: {mesh_shape}")
+
+    # define state spec
+    state_spec = TrainState(
+        params=params_spec,
+        opt_state=opt_state_spec,
+        dropout_rng=None,
+        step=None,
+        epoch=None,
+        train_time=None,
+        train_samples=None,
+        apply_fn=model.__call__,
+        tx=optimizer,
     )
 
-    # create adam optimizer
-    adamw = optax.adamw(
-        learning_rate=lr_schedule_fn,
-        b1=training_args.adam_beta1,
-        b2=training_args.adam_beta2,
-        eps=training_args.adam_epsilon,
-        weight_decay=training_args.weight_decay,
-    )
+    # init params if not available yet
+    def maybe_init_params(params):
+        if params is not None:
+            # model params are correctly loaded
+            return params
+        else:
+            # params have not been initialized yet
+            return model.init_weights(model.key, model.input_shape)
 
-    # Setup train state
-    state = TrainState.create(
-        apply_fn=model.__call__, params=model.params, tx=adamw, dropout_rng=dropout_rng
-    )
+    with mesh:
+        logger.info("  Creating state")
 
-    # Should we replicate these params?
+        # restore metadata
+        attr_state = {}
+        keys = ["train_time", "train_samples"]
+        if model_args.restore_state:
+            keys += ["step", "epoch"]
+        attr_state = {k: v for k, v in model_metadata.items() if k in keys}
+
+        if not model_args.restore_state:
+
+            def init_state(params):
+                return TrainState.create(
+                    apply_fn=model.__call__,
+                    tx=optimizer,
+                    params=maybe_init_params(params),
+                    dropout_rng=dropout_rng,
+                    **attr_state,
+                )
+
+            state = pjit(
+                init_state,
+                in_axis_resources=(params_spec,)
+                if model_args.model_name_or_path
+                else None,
+                out_axis_resources=state_spec,
+                donate_argnums=(0,),
+            )(params)
+
+        else:
+            # load opt_state
+            opt_state = from_bytes(opt_state_shape, model_args.get_opt_state())
+
+            def restore_state(params, opt_state):
+                return TrainState(
+                    apply_fn=model.__call__,
+                    tx=optimizer,
+                    params=params,
+                    opt_state=opt_state,
+                    dropout_rng=dropout_rng,
+                    **attr_state,
+                )
+
+            state = pjit(
+                restore_state,
+                in_axis_resources=(
+                    params_spec,
+                    opt_state_spec,
+                ),
+                out_axis_resources=state_spec,
+                donate_argnums=(0, 1),
+            )(params, opt_state)
+
+            # remove opt_state from CPU
+            del opt_state
+
+    # free CPU memory
+    del params, opt_state_spec, opt_state_shape
+
+    # define batch spec
+    batch_spec = PartitionSpec("dp")
+
+    # TODO: add to state
     lpips, lpips_params = init_lpips(rng, data_args)
 
     # Define gradient update step fn
@@ -607,7 +929,6 @@ def main():
     train_time = 0
     epochs = tqdm(range(num_epochs), desc=f"Epoch ... (1/{num_epochs})", position=0)
 
-    wandb.init(config=flat_args(model_args, data_args, training_args))
     for epoch in epochs:
         # ======================== Training ================================
         train_start = time.time()
