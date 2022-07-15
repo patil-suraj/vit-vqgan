@@ -5,6 +5,7 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict, unfreeze
+from flax.linen import partitioning as nn_partitioning
 from flax.linen.attention import dot_product_attention_weights
 from flax.linen.initializers import variance_scaling
 from flax.traverse_util import flatten_dict
@@ -12,6 +13,9 @@ from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel
 
 from .configuration_vit_vqgan import ViTVQConfig
 from .utils import PretrainedFromWandbMixin
+
+remat = nn_partitioning.remat
+
 
 ACT2FN["tanh"] = nn.tanh
 
@@ -259,9 +263,15 @@ class Transformer(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        self.layers = [
-            TransformerBlock(self.config, name=str(i), dtype=self.dtype) for i in range(self.config.num_hidden_layers)
-        ]
+        layer = (
+            remat(
+                TransformerBlock,
+            )
+            if self.config.gradient_checkpointing
+            else TransformerBlock
+        )
+
+        self.layers = [layer(self.config, name=str(i), dtype=self.dtype) for i in range(self.config.num_hidden_layers)]
 
     def __call__(self, hidden_states, deterministic: bool = True):
         for layer in self.layers:
