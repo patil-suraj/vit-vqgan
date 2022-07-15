@@ -51,14 +51,11 @@ class Dataset:
 
         def _filter_function(image, width, height):
             # filter out images that are too small
-            if self.min_original_image_size is not None and (
-                tf.minimum(width, height) < self.min_original_image_size
-            ):
+            if self.min_original_image_size is not None and (tf.minimum(width, height) < self.min_original_image_size):
                 return False
             # filter out images that have wrong aspect ratio
             if self.max_aspect_ratio is not None and (
-                tf.divide(tf.maximum(width, height), tf.minimum(width, height))
-                > self.max_aspect_ratio
+                tf.divide(tf.maximum(width, height), tf.minimum(width, height)) > self.max_aspect_ratio
             ):
                 return False
             return True
@@ -70,9 +67,7 @@ class Dataset:
             # create a new seed
             new_seed = tf.random.experimental.stateless_split(seed, num=1)[0, :]
             # apply random crop
-            return tf.image.stateless_random_crop(
-                image, size=[self.image_size, self.image_size, 3], seed=new_seed
-            )
+            return tf.image.stateless_random_crop(image, size=[self.image_size, self.image_size, 3], seed=new_seed)
 
         # augmentation wrapper
         def _augment_wrapper(image):
@@ -89,9 +84,7 @@ class Dataset:
                 # convert to lab
                 image = tfio.experimental.color.rgb_to_lab(image)
                 # project to [-1, 1]
-                return image / tf.constant([50.0, 128.0, 128.0]) + tf.constant(
-                    [-1.0, 0.0, 0.0]
-                )
+                return image / tf.constant([50.0, 128.0, 128.0]) + tf.constant([-1.0, 0.0, 0.0])
 
         for folder, dataset, augment in zip(
             [self.train_folder, self.valid_folder],
@@ -111,17 +104,13 @@ class Dataset:
                     ds = ds.repeat()
 
                 # parse dataset
-                ds = ds.map(
-                    _parse_function, num_parallel_calls=tf.data.experimental.AUTOTUNE
-                )
+                ds = ds.map(_parse_function, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
                 # filter dataset
                 ds = ds.filter(_filter_function)
 
                 # parse image
-                ds = ds.map(
-                    _parse_image, num_parallel_calls=tf.data.experimental.AUTOTUNE
-                )
+                ds = ds.map(_parse_image, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
                 if augment:
                     ds = ds.shuffle(1000)
@@ -133,8 +122,6 @@ class Dataset:
 
                 # batch, normalize and prefetch
                 ds = ds.batch(self.batch_size, drop_remainder=True)
-                ds = ds.map(
-                    _normalize, num_parallel_calls=tf.data.experimental.AUTOTUNE
-                )
+                ds = ds.map(_normalize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
                 ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
                 setattr(self, dataset, ds)
