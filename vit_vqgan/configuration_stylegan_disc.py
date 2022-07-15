@@ -2,8 +2,10 @@ from typing import Tuple, Union
 
 from transformers import PretrainedConfig
 
+from .utils import PretrainedFromWandbMixin
 
-class StyleGANDiscriminatorConfig(PretrainedConfig):
+
+class StyleGANDiscriminatorConfig(PretrainedFromWandbMixin, PretrainedConfig):
     def __init__(
         self,
         image_size: Union[int, Tuple[int, int]] = (256, 256),

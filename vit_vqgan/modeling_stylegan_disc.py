@@ -22,6 +22,7 @@ from numpy import block
 from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel
 
 from .configuration_stylegan_disc import StyleGANDiscriminatorConfig
+from .utils import PretrainedFromWandbMixin
 
 ActivationFunction = Callable[[jnp.ndarray], jnp.ndarray]
 
@@ -376,5 +377,5 @@ class StyleGANDiscriminatorPreTrainedModel(FlaxPreTrainedModel):
         )
 
 
-class StyleGANDiscriminator(StyleGANDiscriminatorPreTrainedModel):
+class StyleGANDiscriminator(PretrainedFromWandbMixin, StyleGANDiscriminatorPreTrainedModel):
     module_class = StyleGANDiscriminatorModule

@@ -11,6 +11,7 @@ from flax.traverse_util import flatten_dict
 from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel
 
 from .configuration_vit_vqgan import ViTVQConfig
+from .utils import PretrainedFromWandbMixin
 
 ACT2FN["tanh"] = nn.tanh
 
@@ -603,5 +604,5 @@ class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):
         )
 
 
-class ViTVQModel(ViTVQGANPreTrainedModel):
+class ViTVQModel(PretrainedFromWandbMixin, ViTVQGANPreTrainedModel):
     module_class = VitVQModule

@@ -1,7 +1,9 @@
 from transformers import PretrainedConfig
 
+from .utils import PretrainedFromWandbMixin
 
-class ViTVQConfig(PretrainedConfig):
+
+class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
     def __init__(
         self,
         hidden_size=768,
