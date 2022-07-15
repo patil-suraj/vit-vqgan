@@ -98,12 +98,25 @@ class FeedForwardLayer(nn.Module):
         hidden_states = ACT2FN[self.activation](hidden_states)
         if self.config.use_glu:
             hidden_states *= nn.Dense(
-                self.dim2,
+                self.dim1,
                 use_bias=self.config.use_bias,
                 dtype=self.dtype,
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
                 name="fc1_glu",
             )(x)
+        if self.config.mid_ffn_conv:
+            # suggestion from Katherine Crowson
+            hidden_states = nn.Conv(
+                self.embed_dim,
+                kernel_size=(3, 3),
+                strides=(1, 1),
+                padding="SAME",
+                feature_group_count=self.embed_dim,
+                use_bias=self.config.use_bias,
+                dtype=self.dtype,
+                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+                name="conv",
+            )(hidden_states)
         if self.config.ln_positions == "normformer":
             hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(hidden_states)
         hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)

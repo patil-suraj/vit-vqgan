@@ -24,6 +24,7 @@ class ViTVQConfig(PretrainedConfig):
         patch_size=16,
         use_conv_patches=False,
         post_attention_conv=False,
+        mid_ffn_conv=False,
         use_glu=False,
         hidden_act="relu",
         extra_projection=True,
@@ -53,6 +54,7 @@ class ViTVQConfig(PretrainedConfig):
         self.patch_size = patch_size
         self.use_conv_patches = use_conv_patches
         self.post_attention_conv = post_attention_conv
+        self.mid_ffn_conv = mid_ffn_conv
         self.use_glu = use_glu
         self.image_size = image_size
         self.num_channels = num_channels
