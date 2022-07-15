@@ -180,6 +180,16 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Log model to wandb at `save_steps` frequency."},
     )
+    log_norm_steps: int = field(
+        default=True,
+        metadata={"help": "Log parameters and gradients norm at this frequency."},
+    )
+    log_histogram_steps: int = field(
+        default=False,
+        metadata={
+            "help": "Log parameters and gradients histograms at this frequency. Slows down training."
+        },
+    )
 
     seed_model: int = field(
         default=42,
@@ -235,6 +245,7 @@ class TrainingArguments:
     )
 
     dp_devices: int = field(init=False)
+    log_norm_steps: int = field(init=False)
 
     def __post_init__(self):
         if self.assert_TPU_available:
@@ -258,6 +269,12 @@ class TrainingArguments:
             "linear",
             "exponential",
         ], f"Selected learning rate decay not supported: {self.lr_decay}"
+        if self.log_norm is True:
+            self.log_norm_steps = self.logging_steps
+        elif self.log_norm:
+            self.log_norm_steps = self.log_norm
+        else:
+            self.log_norm_steps = False
         if not self.do_train:
             # eval only
             self.num_train_epochs = 1
@@ -885,6 +902,7 @@ def main():
 
     # define batch spec
     batch_spec = PartitionSpec("dp")
+    grad_batch_spec = PartitionSpec(None, "dp")
 
     # "vmap trick" avoids a crash when mp_devices > 1 (not sure why it happens)
     # lead to better perf: see https://wandb.ai/dalle-mini/dalle-mini/reports/JAX-pmap-vs-pjit--VmlldzoxNDg1ODA2
@@ -1036,6 +1054,59 @@ def main():
             **loss_details,
         }
 
+        # extract norms and histograms
+
+        def maybe_fn(fn, val, zeros, freq):
+            """Call fn only if it is a logging step"""
+            return jax.lax.cond(
+                state.step % freq == 0,
+                fn,
+                lambda _: zeros,
+                val,
+            )
+
+        if training_args.log_norm_steps:
+            zeros_norm = jax.tree_map(lambda _: jnp.float32(0), state.params)
+
+            def norm(val):
+                return jax.tree_map(lambda x: jnp.linalg.norm(x), val)
+
+            gradients_norm = maybe_fn(
+                norm, grads, zeros_norm, training_args.log_norm_steps
+            )
+            params_norm = maybe_fn(
+                norm, state.params, zeros_norm, training_args.log_norm_steps
+            )
+
+            metrics.update(
+                {
+                    "gradients_norm": gradients_norm,
+                    "params_norm": params_norm,
+                }
+            )
+
+        if training_args.log_histogram_steps:
+            zeros_hist = jax.tree_map(
+                lambda _: jnp.histogram(jnp.zeros(1), density=True), state.params
+            )
+
+            def histogram(val):
+                return jax.tree_map(lambda x: jnp.histogram(x, density=True), val)
+
+            gradients_hist = maybe_fn(
+                histogram, grads, zeros_hist, training_args.log_histogram_steps
+            )
+            params_hist = maybe_fn(
+                histogram, state.params, zeros_hist, training_args.log_histogram_steps
+            )
+
+            metrics.update(
+                {
+                    "params_hist": params_hist,
+                    "gradients_hist": gradients_hist,
+                }
+            )
+
         return state, metrics
 
     # Ensure eval_fn is in float32 to avoid numerical issues
@@ -1069,14 +1140,80 @@ def main():
         return loss
 
     # Create parallel version of the train and eval step
-    p_train_step = jax.pmap(train_step, "batch", donate_argnums=(0,))
+    p_train_step = pjit(
+        train_step,
+        in_axis_resources=(
+            state_spec,
+            grad_batch_spec
+            if training_args.gradient_accumulation_steps > 1
+            else batch_spec,
+            None,
+        ),
+        out_axis_resources=(state_spec, None),
+        donate_argnums=(0,),
+    )
+    p_eval_step = pjit(
+        eval_step,
+        in_axis_resources=(state_spec, batch_spec),
+        out_axis_resources=None,
+    )
 
-    # Replicate the train state on each device
-    state = state.replicate()
+    # define metrics logger
+    class MetricsLogger:
+        def __init__(self, step):
+            # keep state to use any key as a custom x-axis
+            self.state_dict = {}
+            # estimate speed
+            self.step = step
+            self.time = time.perf_counter()
+            self.offset_time = 0.0
 
-    logger.info("***** Running training *****")
-    logger.info(f"  Num Epochs = {num_epochs}")
-    logger.info(f"  Total batch size = {data_args.batch_size}")
+        def update_state_metrics(self, state):
+            """Update internal state metrics (logged at each call to be used as x-axis)"""
+            self.state_dict = {
+                f'train/{k.split("_")[-1]}': state[k]
+                for k in ["step", "epoch", "train_time", "train_samples"]
+            }
+            # timing metrics
+            new_step = int(state["step"])
+            new_time = time.perf_counter()
+            if new_step > self.step:
+                # remove time for eval & save
+                delta_time = new_time - self.time - self.offset_time
+                self.offset_time = 0
+                time_per_step = delta_time / (new_step - self.step)
+                self.step = new_step
+                self.time = new_time
+                self.log_time("train_per_step", time_per_step, offset=False)
+                self.log_time("train_per_log", delta_time, offset=False)
+
+        def log_time(self, key, duration, offset=True):
+            if jax.process_index() == 0:
+                wandb.log({f"time/{key}": duration, **self.state_dict})
+            if offset:
+                self.offset_time += duration
+
+        def log(self, metrics, prefix=None):
+            if jax.process_index() == 0:
+                log_metrics = {}
+                for k, v in metrics.items():
+                    if "_norm" in k:
+                        if self.step % training_args.log_norm_steps == 0:
+                            log_metrics[f"{k}/"] = unfreeze(v)
+                    elif "_hist" in k:
+                        if self.step % training_args.log_histogram_steps == 0:
+                            v = jax.tree_map(lambda x: jax.device_get(x), unfreeze(v))
+                            v = jax.tree_map(
+                                lambda x: wandb.Histogram(np_histogram=x),
+                                v,
+                                is_leaf=lambda x: isinstance(x, tuple),
+                            )
+                            log_metrics[f"{k}/"] = v
+                    else:
+                        if prefix is not None:
+                            k = f"{prefix}/{k}"
+                        log_metrics[k] = v
+                wandb.log({**log_metrics, **self.state_dict})
 
     train_time = 0
     epochs = tqdm(range(num_epochs), desc=f"Epoch ... (1/{num_epochs})", position=0)
