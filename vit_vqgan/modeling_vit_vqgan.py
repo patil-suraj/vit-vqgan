@@ -4,9 +4,10 @@ from typing import Tuple
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-from flax.core.frozen_dict import FrozenDict
+from flax.core.frozen_dict import FrozenDict, unfreeze
 from flax.linen.attention import dot_product_attention_weights
 from flax.linen.initializers import variance_scaling
+from flax.traverse_util import flatten_dict
 from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel
 
 from .configuration_vit_vqgan import ViTVQConfig
@@ -534,6 +535,12 @@ class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):
         rngs = {"params": params_rng, "dropout": dropout_rng}
 
         return self.module.init(rngs, pixel_values)["params"]
+
+    def num_params(self, params=None):
+        if params is None:
+            params = self.params
+        num_params = jax.tree_map(lambda param: param.size, flatten_dict(unfreeze(params))).values()
+        return sum(list(num_params))
 
     def encode(
         self,
