@@ -897,6 +897,32 @@ def main():
             params_spec,
         )
 
+    # Define loss
+    def compute_loss(params, minibatch, dropout_rng, model_fn, train):
+        predicted_images, (q_latent_loss, e_latent_loss) = model_fn(
+            minibatch, params=params, dropout_rng=dropout_rng, train=train
+        )
+        # TODO: replace l1 with logit laplace
+        loss_l1 = jnp.mean(jnp.abs(predicted_images - minibatch))
+        loss_l2 = jnp.mean((predicted_images - minibatch) ** 2)
+        loss_lpips = jnp.mean(
+            state.lpips_fn.apply(state.lpips_params, minibatch, predicted_images)
+        )
+        loss = (
+            model.config.cost_l1 * loss_l1
+            + model.config.cost_l2 * loss_l2
+            + model.config.cost_q_latent * q_latent_loss
+            + model.config.cost_e_latent * e_latent_loss
+            + model.config.cost_lpips * loss_lpips
+        )
+        return loss, {
+            "loss_l1": model.config.cost_l1 * loss_l1,
+            "loss_l2": model.config.cost_l2 * loss_l2,
+            "loss_q_latent": model.config.cost_q_latent * q_latent_loss,
+            "loss_e_latent": model.config.cost_e_latent * e_latent_loss,
+            "loss_lpips": model.config.cost_lpips * loss_lpips,
+        }
+
     # Define gradient update step fn
     def train_step(state, batch, train_time):
 
@@ -906,31 +932,6 @@ def main():
                 lambda x: jax.lax.dynamic_index_in_dim(x, grad_idx, keepdims=False),
                 batch,
             )
-
-        def compute_loss(params, minibatch, dropout_rng):
-            predicted_images, (q_latent_loss, e_latent_loss) = state.apply_fn(
-                minibatch, params=params, dropout_rng=dropout_rng, train=True
-            )
-            # TODO: replace l1 with logit laplace
-            loss_l1 = jnp.mean(jnp.abs(predicted_images - batch))
-            loss_l2 = jnp.mean((predicted_images - batch) ** 2)
-            loss_lpips = jnp.mean(
-                state.lpips_fn.apply(state.lpips_params, batch, predicted_images)
-            )
-            loss = (
-                model.config.cost_l1 * loss_l1
-                + model.config.cost_l2 * loss_l2
-                + model.config.cost_q_latent * q_latent_loss
-                + model.config.cost_e_latent * e_latent_loss
-                + model.config.cost_lpips * loss_lpips
-            )
-            return loss, {
-                "loss_l1": model.config.cost_l1 * loss_l1,
-                "loss_l2": model.config.cost_l2 * loss_l2,
-                "loss_q_latent": model.config.cost_q_latent * q_latent_loss,
-                "loss_e_latent": model.config.cost_e_latent * e_latent_loss,
-                "loss_lpips": model.config.cost_lpips * loss_lpips,
-            }
 
         grad_fn = jax.value_and_grad(compute_loss, has_aux=True)
 
@@ -947,8 +948,8 @@ def main():
             if use_vmap_trick:
                 # "vmap trick", calculate loss and grads independently per dp_device
                 loss, grads = jax.vmap(
-                    grad_fn, in_axes=(None, 0, None), out_axes=(0, 0)
-                )(state.params, minibatch, dropout_rng)
+                    grad_fn, in_axes=(None, 0, None, None), out_axes=(0, 0)
+                )(state.params, minibatch, dropout_rng, state.apply_fn)
                 # ensure they are sharded correctly
                 loss = with_sharding_constraint(loss, batch_spec)
                 grads = with_sharding_constraint(grads, grad_params_spec)
@@ -958,7 +959,7 @@ def main():
             else:
                 # "vmap trick" does not work in multi-hosts and requires too much hbm
                 (loss, loss_details), grads = grad_fn(
-                    state.params, minibatch, dropout_rng
+                    state.params, minibatch, dropout_rng, state.apply_fn
                 )
             # ensure grads are sharded
             grads = with_sharding_constraint(grads, params_spec)
@@ -1036,6 +1037,36 @@ def main():
         }
 
         return state, metrics
+
+    # Ensure eval_fn is in float32 to avoid numerical issues
+    eval_model = (
+        model
+        if model_args.dtype == "float32"
+        else ViTVQModel(
+            model.config,
+            seed=training_args.seed_model,
+            dtype=jnp.float32,
+            _do_init=False,
+        )
+    )
+
+    # Evaluation step
+    def eval_step(state, batch):
+        def compute_eval_loss(batch):
+            return compute_loss(
+                state.params, batch, dropout_rng=None, model_fn=eval_model, train=False
+            )
+
+        if use_vmap_trick:
+            loss = jax.vmap(compute_eval_loss)(batch)
+            # ensure they are sharded correctly
+            loss = with_sharding_constraint(loss, batch_spec)
+            # average across all devices
+            loss = jnp.mean(loss)
+        else:
+            loss = compute_eval_loss(batch)
+
+        return loss
 
     # Create parallel version of the train and eval step
     p_train_step = jax.pmap(train_step, "batch", donate_argnums=(0,))
