@@ -13,8 +13,8 @@ class Dataset:
     valid_folder: str = None
     batch_size: int = 64
     image_size: int = 256
-    min_original_image_size: int = 512
-    max_original_aspect_ratio: float = 2.0
+    min_original_image_size: int = None
+    max_original_aspect_ratio: float = None
     seed_dataset: int = None
     format: str = "rgb"  # rgb or lab
     train: tf.data.Dataset = field(init=False)
@@ -63,6 +63,10 @@ class Dataset:
         def _parse_image(image, width, height):
             return tfio.image.decode_webp(image)[..., :3]
 
+        def _parse_no_filter(example_proto):
+            # we can combine parsing functions into one
+            return _parse_image(*_parse_function(example_proto))
+
         def _augment(image, seed):
             # create a new seed
             new_seed = tf.random.experimental.stateless_split(seed, num=1)[0, :]
@@ -104,13 +108,22 @@ class Dataset:
                     ds = ds.repeat()
 
                 # parse dataset
-                ds = ds.map(_parse_function, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+                if self.min_original_image_size is None and self.max_original_aspect_ratio is None:
+                    ds = ds.map(
+                        _parse_no_filter,
+                        num_parallel_calls=tf.data.experimental.AUTOTUNE,
+                    )
+                else:
+                    ds = ds.map(
+                        _parse_function,
+                        num_parallel_calls=tf.data.experimental.AUTOTUNE,
+                    )
 
-                # filter dataset
-                ds = ds.filter(_filter_function)
+                    # filter dataset
+                    ds = ds.filter(_filter_function)
 
-                # parse image
-                ds = ds.map(_parse_image, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+                    # parse image
+                    ds = ds.map(_parse_image, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
                 if augment:
                     ds = ds.shuffle(1000)
