@@ -60,6 +60,18 @@ def to_image(patches, patch_size):
     return patches
 
 
+def patch_1D_to_2D(patch):
+    _, n_patches, dim = patch.shape
+    w_h = int(n_patches**0.5)
+    assert w_h * w_h == n_patches
+    return patch.reshape((-1, w_h, w_h, dim))
+
+
+def patch_2D_to_1D(patch):
+    _, w_h, _, dim = patch.shape
+    return patch.reshape((-1, w_h * w_h, dim))
+
+
 class ConvPatches(nn.Module):
     config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
@@ -112,6 +124,7 @@ class FeedForwardLayer(nn.Module):
             )(x)
         if self.config.mid_ffn_conv:
             # suggestion from Katherine Crowson
+            hidden_states = patch_1D_to_2D(hidden_states)
             hidden_states = nn.Conv(
                 self.embed_dim,
                 kernel_size=(3, 3),
@@ -123,6 +136,7 @@ class FeedForwardLayer(nn.Module):
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
                 name="conv",
             )(hidden_states)
+            hidden_states = patch_2D_to_1D(hidden_states)
         if self.config.ln_positions == "normformer":
             hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(hidden_states)
         hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
@@ -224,7 +238,9 @@ class Attention(nn.Module):
         attn_output = self._merge_heads(attn_output)
         attn_output = self.out_proj(attn_output)
         if self.config.post_attention_conv:
+            attn_output = patch_1D_to_2D(attn_output)
             attn_output = self.conv(attn_output)
+            attn_output = patch_2D_to_1D(attn_output)
 
         return attn_output
 
@@ -370,17 +386,17 @@ class VectorQuantizer(nn.Module):
             2. flatten input to (B*H*W,C)
         """
         #  flatten
-        hidden_states_flattended = hidden_states.reshape((-1, self.config.codebook_embed_dim))
+        hidden_states_flattened = hidden_states.reshape((-1, self.config.codebook_embed_dim))
 
         # normalize `z` here `hidden_states` and codebook latent variable `e` (here `embedding`)
-        hidden_states_flattended = l2_normalize(hidden_states_flattended, axis=1)
+        hidden_states_flattened = l2_normalize(hidden_states_flattened, axis=1)
         embedding = l2_normalize(self.embedding, axis=1)
 
         # distances from z to embeddings e_j (z - e)^2 = z^2 + e^2 - 2 e * z
         distance = (
-            jnp.sum(hidden_states_flattended**2, axis=1, keepdims=True)
+            jnp.sum(hidden_states_flattened**2, axis=1, keepdims=True)
             + jnp.sum(embedding**2, axis=1)
-            - 2 * jnp.dot(hidden_states_flattended, embedding.T)
+            - 2 * jnp.dot(hidden_states_flattened, embedding.T)
         )
 
         # get quantized latent vectors
