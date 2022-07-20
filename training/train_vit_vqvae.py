@@ -1,4 +1,3 @@
-import io
 import logging
 import os
 import sys
@@ -6,6 +5,7 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
 
@@ -17,18 +17,13 @@ import numpy as np
 import optax
 import transformers
 import wandb
-from flax import core, jax_utils, struct, traverse_util
+from flax import core, struct
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
-from flax.jax_utils import unreplicate
 from flax.serialization import from_bytes, to_bytes
-from flax.training import train_state
-from flax.training.common_utils import onehot, shard, shard_prng_key
 from huggingface_hub import Repository
 from jax.experimental import PartitionSpec, maps
-from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
 from lpips_j.lpips import LPIPS
-from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
 from transformers import HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
@@ -36,7 +31,8 @@ from transformers.utils import get_full_repo_name
 from vit_vqgan import ViTVQConfig, ViTVQModel
 from vit_vqgan.data import Dataset
 
-cc.initialize_cache("./jax_cache", max_cache_size_bytes=5 * 2**30)
+# TODO: fix imports
+# from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +179,7 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Log model to wandb at `save_steps` frequency."},
     )
-    log_norm_steps: int = field(
+    log_norm: bool = field(
         default=True,
         metadata={"help": "Log parameters and gradients norm at this frequency."},
     )
@@ -464,58 +460,11 @@ class DataTrainingArguments:
     )
 
 
-class TrainState(struct.PyTreeNode):
-    # TODO: add separate gradients & opt_state for discriminator
-    step: int
-    params: core.FrozenDict[str, Any]
-    lpips_params: core.FrozenDict[str, Any]
-    opt_state: optax.OptState
-    apply_fn: Callable = struct.field(pytree_node=False)
-    lpips_fn: Callable = struct.field(pytree_node=False)
-    tx: optax.GradientTransformation = struct.field(pytree_node=False)
-    dropout_rng: jnp.ndarray = None
-    epoch: int = 0
-    train_time: float = 0.0  # total time the model trained
-    train_samples: int = 0  # number of samples seen
-
-    def apply_gradients(self, *, grads, **kwargs):
-
-        updates, new_opt_state = self.tx.update(grads, self.opt_state, self.params)
-        new_params = optax.apply_updates(self.params, updates)
-        return self.replace(
-            step=self.step + 1,
-            params=new_params,
-            opt_state=new_opt_state,
-            **kwargs,
-        )
-
-    @classmethod
-    def create(cls, *, apply_fn, params, lpips_fn, lpips_params, tx, **kwargs):
-        opt_state = tx.init(params)
-        return cls(
-            step=0,
-            apply_fn=apply_fn,
-            params=params,
-            lpips_fn=lpips_fn,
-            lpips_params=lpips_params,
-            tx=tx,
-            opt_state=opt_state,
-            **kwargs,
-        )
-
-
 def flat_args(model_args, data_args, training_args):
     args = asdict(model_args)
     args.update(asdict(data_args))
     args.update(asdict(training_args))
     return args
-
-
-def init_lpips(rng, image_size):
-    x = jax.random.normal(rng, shape=(1, image_size, image_size, 3))
-    lpips_fn = LPIPS()
-    lpips_params = lpips_fn.init(rng, x, x)
-    return lpips_fn, lpips_params
 
 
 assert jax.local_device_count() == 8
@@ -617,7 +566,7 @@ def main():
         params = None
 
     # get model metadata
-    model_metadata = model.get_metadata()
+    model_metadata = model_args.get_metadata()
 
     # get PartitionSpec and shape for model params
     params_spec = None
@@ -789,20 +738,23 @@ def main():
         # get PartitionSpec
         if training_args.optim == "adam":
 
-            def _opt_state_spec_per_leaf(x, spec):
+            def _opt_state_spec_per_leaf(x):
                 if isinstance(x, FrozenDict):
                     # variables with same structure as params
-                    return spec
+                    return params_spec
                 else:
                     # other variables such as count
                     return None
 
-            opt_state_spec = jax.tree_map(
-                _opt_state_spec_per_leaf,
-                opt_state_shape,
-                params_spec,
-                # return None spec for empty elements
-                is_leaf=lambda x: isinstance(x, (FrozenDict, optax.EmptyState)),
+            opt_state_spec = (
+                None
+                if params_spec is None
+                else jax.tree_map(
+                    _opt_state_spec_per_leaf,
+                    opt_state_shape,
+                    # return None spec for empty elements
+                    is_leaf=lambda x: isinstance(x, (FrozenDict, optax.EmptyState)),
+                )
             )
         elif training_args.optim == "distributed_shampoo":
             opt_state_spec = opt_fn.pspec_fn(
@@ -812,7 +764,7 @@ def main():
             )
         else:
             raise NotImplementedError
-        return freeze(opt_state_spec), freeze(opt_state_shape)
+        return opt_state_spec, opt_state_shape
 
     opt_state_spec, opt_state_shape = get_opt_state_spec_and_shape()
 
@@ -821,6 +773,40 @@ def main():
     devices = np.asarray(jax.devices()).reshape(*mesh_shape)
     mesh = maps.Mesh(devices, ("dp", "mp"))
     logger.info(f"  Mesh shape: {mesh_shape}")
+
+    class TrainState(struct.PyTreeNode):
+        # TODO: add separate gradients & opt_state for discriminator
+        step: int
+        params: core.FrozenDict[str, Any]
+        lpips_params: core.FrozenDict[str, Any]
+        opt_state: optax.OptState
+        dropout_rng: jnp.ndarray = None
+        epoch: int = 0
+        train_time: float = 0.0  # total time the model trained
+        train_samples: int = 0  # number of samples seen
+
+        def apply_gradients(self, *, grads, **kwargs):
+            updates, new_opt_state = optimizer.update(
+                grads, self.opt_state, self.params
+            )
+            new_params = optax.apply_updates(self.params, updates)
+            return self.replace(
+                step=self.step + 1,
+                params=new_params,
+                opt_state=new_opt_state,
+                **kwargs,
+            )
+
+        @classmethod
+        def create(cls, *, params, lpips_params, **kwargs):
+            opt_state = optimizer.init(params)
+            return cls(
+                step=0,
+                params=params,
+                lpips_params=lpips_params,
+                opt_state=opt_state,
+                **kwargs,
+            )
 
     # define state spec
     state_spec = TrainState(
@@ -831,11 +817,15 @@ def main():
         epoch=None,
         train_time=None,
         train_samples=None,
-        apply_fn=None,
         lpips_params=lpips_spec,
-        lpips_fn=None,
-        tx=None,
     )
+
+    # define lpips
+    lpips_fn = LPIPS()
+
+    def init_lpips(rng, image_size):
+        x = jax.random.normal(rng, shape=(1, image_size, image_size, 3))
+        return lpips_fn.init(rng, x, x)
 
     # init params if not available yet
     def maybe_init_params(params):
@@ -859,12 +849,9 @@ def main():
         if not model_args.restore_state:
 
             def init_state(params):
-                lpips, lpips_params = init_lpips(rng, data_args.image_size)
+                lpips_params = init_lpips(rng, data_args.image_size)
                 return TrainState.create(
-                    apply_fn=model.__call__,
-                    tx=optimizer,
                     params=maybe_init_params(params),
-                    lpips_fn=lpips,
                     lpips_params=lpips_params,
                     dropout_rng=dropout_rng,
                     **attr_state,
@@ -884,13 +871,10 @@ def main():
             opt_state = from_bytes(opt_state_shape, model_args.get_opt_state())
 
             def restore_state(params, opt_state):
-                lpips, lpips_params = init_lpips(rng, data_args.image_size)
+                lpips_params = init_lpips(rng, data_args.image_size)
                 return TrainState(
-                    apply_fn=model.__call__,
-                    tx=optimizer,
                     params=params,
                     opt_state=opt_state,
-                    lpips_fn=lpips,
                     lpips_params=lpips_params,
                     dropout_rng=dropout_rng,
                     **attr_state,
@@ -933,7 +917,7 @@ def main():
         loss_l1 = jnp.mean(jnp.abs(predicted_images - minibatch))
         loss_l2 = jnp.mean((predicted_images - minibatch) ** 2)
         loss_lpips = jnp.mean(
-            state.lpips_fn.apply(state.lpips_params, minibatch, predicted_images)
+            lpips_fn.apply(state.lpips_params, minibatch, predicted_images)
         )
         loss = (
             model.config.cost_l1 * loss_l1
@@ -960,7 +944,8 @@ def main():
                 batch,
             )
 
-        grad_fn = jax.value_and_grad(compute_loss, has_aux=True)
+        train_compute_loss = partial(compute_loss, train=True)
+        grad_fn = jax.value_and_grad(train_compute_loss, has_aux=True)
 
         def loss_and_grad(grad_idx, dropout_rng):
             # minibatch at grad_idx for gradient accumulation (None otherwise)
@@ -976,7 +961,7 @@ def main():
                 # "vmap trick", calculate loss and grads independently per dp_device
                 loss, grads = jax.vmap(
                     grad_fn, in_axes=(None, 0, None, None), out_axes=(0, 0)
-                )(state.params, minibatch, dropout_rng, state.apply_fn)
+                )(state.params, minibatch, dropout_rng, model)
                 # ensure they are sharded correctly
                 loss = with_sharding_constraint(loss, batch_spec)
                 grads = with_sharding_constraint(grads, grad_params_spec)
@@ -986,7 +971,7 @@ def main():
             else:
                 # "vmap trick" does not work in multi-hosts and requires too much hbm
                 (loss, loss_details), grads = grad_fn(
-                    state.params, minibatch, dropout_rng, state.apply_fn
+                    state.params, minibatch, dropout_rng, model
                 )
             # ensure grads are sharded
             grads = with_sharding_constraint(grads, params_spec)
