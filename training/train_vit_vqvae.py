@@ -1344,17 +1344,12 @@ def main():
                 # create model artifact
                 artifact = wandb.Artifact(
                     name=f"model-{wandb.run.id}",
-                    type="DalleBart_model",
+                    type="ViT-VQGAN",
                     metadata=metadata,
                 )
                 for filename in [
                     "config.json",
                     "flax_model.msgpack",
-                    "merges.txt",
-                    "special_tokens_map.json",
-                    "tokenizer.json",
-                    "tokenizer_config.json",
-                    "vocab.json",
                 ]:
                     artifact.add_file(f"{Path(training_args.output_dir) / filename}")
                 wandb.run.log_artifact(artifact)
@@ -1362,7 +1357,7 @@ def main():
                 # create state artifact
                 artifact_state = wandb.Artifact(
                     name=f"state-{wandb.run.id}",
-                    type="DalleBart_state",
+                    type="state",
                     metadata=metadata,
                 )
                 artifact_state.add_file(
@@ -1422,7 +1417,7 @@ def main():
                     state, train_metrics = p_train_step(state, batch, train_time)
                     local_state["step"] += 1
                     local_state["train_time"] = train_time
-                    local_state["train_samples"] += batch_size_per_step
+                    local_state["train_samples"] += training_args.batch_size_per_step
 
                     if (
                         local_state["step"] % training_args.logging_steps == 0
