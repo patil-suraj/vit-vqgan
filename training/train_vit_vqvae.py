@@ -251,7 +251,9 @@ class TrainingArguments:
     local_dp_devices: int = field(init=False)
     node_groups: int = field(init=False)
     batch_size_per_step: int = field(init=False)
-    batch_size_dataloader: int = field(init=False)
+    train_batch_size: int = field(init=False)
+    valid_batch_size: int = field(init=False)
+    valid_batch_size_per_node: int = field(init=False)
     log_norm_steps: int = field(init=False)
 
     def __post_init__(self):
@@ -315,10 +317,16 @@ class TrainingArguments:
         self.batch_size_per_step = batch_size_per_node_per_step * jax.process_count()
         # consider batch distributed across nodes (mp > local devices)
         self.node_groups = max(1, self.mp_devices // jax.local_device_count())
-        self.batch_size_dataloader = batch_size_per_node_per_step * self.node_groups
+        # define batch size for data loader
+        self.train_batch_size = batch_size_per_node_per_step * self.node_groups
+        self.valid_batch_size = self.batch_size_per_node * jax.process_count()
+        self.valid_batch_size_per_node = self.batch_size_per_node * self.node_groups
         # local dp devices (1 when mp > local devices)
         self.local_dp_devices = (
             jax.local_device_count() * self.node_groups // self.mp_devices
+        )
+        self.batch_size_per_local_dp_device = (
+            self.batch_size_per_node // self.local_dp_devices
         )
 
     def to_dict(self):
@@ -564,7 +572,9 @@ def main():
 
     # Initialize datasets and pre-processing transforms
     dataset = Dataset(
-        batch_size=training_args.batch_size_dataloader, **asdict(data_args)
+        train_batch_size=training_args.train_batch_size,
+        valid_batch_size=training_args.valid_batch_size,
+        **asdict(data_args),
     )
 
     # Info on local devices
@@ -1237,65 +1247,54 @@ def main():
         # ======================== Evaluating ==============================
         if training_args.do_eval:
             start_eval_time = time.perf_counter()
-            # get validation datasets
-            dataset.valid.as_numpy_iterator()
-            for val_dataset in val_datasets:
-                eval_loader = dataset.dataloader(
-                    val_dataset,
-                    eval_batch_size_per_step
-                    * max(1, training_args.mp_devices // jax.local_device_count()),
+            eval_loss = []
+            for batch in tqdm(
+                dataset.valid.as_numpy_iterator(),
+                desc="Evaluating...",
+                position=2,
+                leave=False,
+                disable=jax.process_index() > 0,
+            ):
+                # need to keep only items relevant to the node
+                batch = jax.tree_map(
+                    lambda x: x.reshape(
+                        (
+                            jax.process_count() // training_args.node_groups,
+                            training_args.valid_batch_size_per_node,
+                        )
+                        + x.shape[1:]
+                    ),
+                    batch,
                 )
-                eval_steps = (
-                    len_eval_dataset // eval_batch_size_per_step
-                    if len_eval_dataset is not None
-                    else None
+                batch = jax.tree_map(
+                    lambda x: x[jax.process_index() // training_args.node_groups], batch
                 )
-                eval_loss = []
-                for batch in tqdm(
-                    eval_loader,
-                    desc="Evaluating...",
-                    position=2,
-                    leave=False,
-                    total=eval_steps,
-                    disable=jax.process_index() > 0,
-                ):
-                    # need to keep only eval_batch_size_per_node items relevant to the node
-                    batch = jax.tree_map(
-                        lambda x: x.reshape(
-                            (jax.process_count(), eval_batch_size_per_node)
-                            + x.shape[1:]
-                        ),
-                        batch,
+
+                # add dp dimension when using "vmap trick"
+                if training_args.use_vmap_trick:
+                    bs_shape = (
+                        training_args.local_dp_devices,
+                        training_args.batch_size_per_local_dp_device,
                     )
-                    batch = jax.tree_map(lambda x: x[jax.process_index()], batch)
+                    batch = jax.tree_map(
+                        lambda x: x.reshape(bs_shape + x.shape[1:]), batch
+                    )
 
-                    # add dp dimension when using "vmap trick"
-                    if training_args.use_vmap_trick:
-                        bs_shape = (
-                            jax.local_device_count() // training_args.mp_devices,
-                            training_args.per_device_eval_batch_size,
-                        )
-                        batch = jax.tree_map(
-                            lambda x: x.reshape(bs_shape + x.shape[1:]), batch
-                        )
+                # accumulate losses async
+                eval_loss.append(p_eval_step(state, batch))
 
-                    # freeze batch to pass safely to jax transforms
-                    batch = freeze(batch)
-                    # accumulate losses async
-                    eval_loss.append(p_eval_step(state, batch))
+            # get the mean of the loss
+            eval_loss = jnp.stack(eval_loss)
+            eval_loss = jnp.mean(eval_loss)
+            eval_metrics = {"loss": eval_loss}
 
-                # get the mean of the loss
-                eval_loss = jnp.stack(eval_loss)
-                eval_loss = jnp.mean(eval_loss)
-                eval_metrics = {"loss": eval_loss}
+            # log metrics
+            metrics_logger.log(eval_metrics, prefix="valid")
 
-                # log metrics
-                metrics_logger.log(eval_metrics, prefix=val_dataset)
-
-                # Print metrics and update progress bar
-                desc = f"Epoch... ({epoch + 1}/{num_epochs} | {val_dataset} Loss: {eval_metrics['loss']})"
-                epochs.write(desc)
-                epochs.desc = desc
+            # Print metrics and update progress bar
+            desc = f"Epoch... ({epoch + 1}/{num_epochs} | Valid Loss: {eval_metrics['loss']})"
+            epochs.write(desc)
+            epochs.desc = desc
 
             # log time
             metrics_logger.log_time("eval", time.perf_counter() - start_eval_time)
@@ -1397,7 +1396,7 @@ def main():
                         if not training_args.use_vmap_trick
                         else (
                             training_args.local_dp_devices,
-                            training_args.per_device_train_batch_size,
+                            training_args.batch_size_per_local_dp_device,
                         )
                     )
                     if training_args.gradient_accumulation_steps > 1:
