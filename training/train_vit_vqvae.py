@@ -8,7 +8,6 @@ from enum import Enum
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
-
 import flax
 import jax
 import jax.numpy as jnp
@@ -1121,20 +1120,24 @@ def main():
     # Evaluation step
     def eval_step(state, batch):
         def compute_eval_loss(batch):
-            return compute_loss(
+            loss, loss_details = compute_loss(
                 state.params, batch, dropout_rng=None, model_fn=eval_model, train=False
             )
+            return {
+                "loss": loss,
+                **loss_details,
+            }
 
         if training_args.use_vmap_trick:
-            loss = jax.vmap(compute_eval_loss)(batch)
+            metrics = jax.vmap(compute_eval_loss)(batch)
             # ensure they are sharded correctly
-            loss = with_sharding_constraint(loss, batch_spec)
+            metrics = with_sharding_constraint(metrics, batch_spec)
             # average across all devices
-            loss = jnp.mean(loss)
+            metrics = jax.tree_map(jnp.mean, metrics)
         else:
-            loss = compute_eval_loss(batch)
+            metrics = compute_eval_loss(batch)
 
-        return loss
+        return metrics
 
     # Create parallel version of the train and eval step
     p_train_step = pjit(
@@ -1235,7 +1238,7 @@ def main():
         # ======================== Evaluating ==============================
         if training_args.do_eval:
             start_eval_time = time.perf_counter()
-            eval_loss = []
+            metrics = []
             for batch in tqdm(
                 dataset.valid.as_numpy_iterator(),
                 desc="Evaluating...",
@@ -1269,25 +1272,26 @@ def main():
                     )
 
                 # accumulate losses async
-                eval_loss.append(p_eval_step(state, batch))
+                metrics.append(p_eval_step(state, batch))
 
-            # get the mean of the loss
-            eval_loss = jnp.stack(eval_loss)
-            eval_loss = jnp.mean(eval_loss)
-            eval_metrics = {"loss": eval_loss}
+            # get the mean of the metrics
+            metrics = jax.tree_map(lambda *args: jnp.stack(args), *metrics)
+            metrics = jax.tree_map(jnp.mean, metrics)
 
             # log metrics
-            metrics_logger.log(eval_metrics, prefix="valid")
+            metrics_logger.log(metrics, prefix="valid")
 
             # Print metrics and update progress bar
-            desc = f"Epoch... ({epoch + 1}/{num_epochs} | Valid Loss: {eval_metrics['loss']})"
+            desc = (
+                f"Epoch... ({epoch + 1}/{num_epochs} | Valid Loss: {metrics['loss']})"
+            )
             epochs.write(desc)
             epochs.desc = desc
 
             # log time
-            metrics_logger.log_time("eval", time.perf_counter() - start_eval_time)
+            metrics_logger.log_time("valid", time.perf_counter() - start_eval_time)
 
-            return eval_metrics
+            return metrics
 
     def run_save_model(state, eval_metrics=None):
         if jax.process_index() == 0:
