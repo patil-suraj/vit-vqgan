@@ -11,7 +11,8 @@ import tensorflow_io as tfio
 class Dataset:
     train_folder: str = None
     valid_folder: str = None
-    batch_size: int = 64
+    train_batch_size: int = 64
+    valid_batch_size: int = 64
     image_size: int = 256
     min_original_image_size: int = None
     max_original_aspect_ratio: float = None
@@ -51,11 +52,14 @@ class Dataset:
 
         def _filter_function(image, width, height):
             # filter out images that are too small
-            if self.min_original_image_size is not None and (tf.minimum(width, height) < self.min_original_image_size):
+            if self.min_original_image_size is not None and (
+                tf.minimum(width, height) < self.min_original_image_size
+            ):
                 return False
             # filter out images that have wrong aspect ratio
             if self.max_original_aspect_ratio is not None and (
-                tf.divide(tf.maximum(width, height), tf.minimum(width, height)) > self.max_original_aspect_ratio
+                tf.divide(tf.maximum(width, height), tf.minimum(width, height))
+                > self.max_original_aspect_ratio
             ):
                 return False
             return True
@@ -71,7 +75,9 @@ class Dataset:
             # create a new seed
             new_seed = tf.random.experimental.stateless_split(seed, num=1)[0, :]
             # apply random crop
-            return tf.image.stateless_random_crop(image, size=[self.image_size, self.image_size, 3], seed=new_seed)
+            return tf.image.stateless_random_crop(
+                image, size=[self.image_size, self.image_size, 3], seed=new_seed
+            )
 
         # augmentation wrapper
         def _augment_wrapper(image):
@@ -88,12 +94,15 @@ class Dataset:
                 # convert to lab
                 image = tfio.experimental.color.rgb_to_lab(image)
                 # project to [-1, 1]
-                return image / tf.constant([50.0, 128.0, 128.0]) + tf.constant([-1.0, 0.0, 0.0])
+                return image / tf.constant([50.0, 128.0, 128.0]) + tf.constant(
+                    [-1.0, 0.0, 0.0]
+                )
 
-        for folder, dataset, augment in zip(
+        for folder, dataset, augment, batch_size in zip(
             [self.train_folder, self.valid_folder],
             ["train", "valid"],
             [True, False],
+            [self.train_batch_size, self.valid_batch_size],
         ):
             if folder is not None:
                 # load files
@@ -108,7 +117,10 @@ class Dataset:
                     ds = ds.repeat()
 
                 # parse dataset
-                if self.min_original_image_size is None and self.max_original_aspect_ratio is None:
+                if (
+                    self.min_original_image_size is None
+                    and self.max_original_aspect_ratio is None
+                ):
                     ds = ds.map(
                         _parse_no_filter,
                         num_parallel_calls=tf.data.experimental.AUTOTUNE,
@@ -123,7 +135,9 @@ class Dataset:
                     ds = ds.filter(_filter_function)
 
                     # parse image
-                    ds = ds.map(_parse_image, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+                    ds = ds.map(
+                        _parse_image, num_parallel_calls=tf.data.experimental.AUTOTUNE
+                    )
 
                 if augment:
                     ds = ds.shuffle(1000)
@@ -134,7 +148,9 @@ class Dataset:
                     )
 
                 # batch, normalize and prefetch
-                ds = ds.batch(self.batch_size, drop_remainder=True)
-                ds = ds.map(_normalize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+                ds = ds.batch(batch_size, drop_remainder=True)
+                ds = ds.map(
+                    _normalize, num_parallel_calls=tf.data.experimental.AUTOTUNE
+                )
                 ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
                 setattr(self, dataset, ds)
