@@ -959,15 +959,18 @@ def main():
 
             if training_args.use_vmap_trick:
                 # "vmap trick", calculate loss and grads independently per dp_device
-                loss, grads = jax.vmap(
+                (loss, loss_details), grads = jax.vmap(
                     grad_fn, in_axes=(None, 0, None, None), out_axes=(0, 0)
                 )(state.params, minibatch, dropout_rng, model)
                 # ensure they are sharded correctly
                 loss = with_sharding_constraint(loss, batch_spec)
+                loss_details = with_sharding_constraint(loss_details, batch_spec)
                 grads = with_sharding_constraint(grads, grad_params_spec)
                 # average across all devices
                 # Note: we could average per device only after gradient accumulation, right before params update
-                loss, grads = jax.tree_map(lambda x: jnp.mean(x, axis=0), (loss, grads))
+                loss, grads, loss_details = jax.tree_map(
+                    lambda x: jnp.mean(x, axis=0), (loss, grads, loss_details)
+                )
             else:
                 # "vmap trick" does not work in multi-hosts and requires too much hbm
                 (loss, loss_details), grads = grad_fn(
