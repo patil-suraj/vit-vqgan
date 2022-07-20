@@ -61,6 +61,9 @@ class TrainingArguments:
     do_eval: bool = field(
         default=False, metadata={"help": "Whether to run eval on the dev set."}
     )
+    batch_size_per_node: Optional[int] = field(
+        default=64, metadata={"help": "Batch size for training."}
+    )
 
     gradient_accumulation_steps: int = field(
         default=1,
@@ -245,6 +248,10 @@ class TrainingArguments:
     )
 
     dp_devices: int = field(init=False)
+    local_dp_devices: int = field(init=False)
+    node_groups: int = field(init=False)
+    batch_size_per_step: int = field(init=False)
+    batch_size_dataloader: int = field(init=False)
     log_norm_steps: int = field(init=False)
 
     def __post_init__(self):
@@ -302,6 +309,17 @@ class TrainingArguments:
             jax.device_count() % self.mp_devices == 0
         ), f"Number of available devices ({jax.device_count()} must be divisible by number of devices used for model parallelism ({self.mp_devices})."
         self.dp_devices = jax.device_count() // self.mp_devices
+        batch_size_per_node_per_step = (
+            self.batch_size_per_node * self.gradient_accumulation_steps
+        )
+        self.batch_size_per_step = batch_size_per_node_per_step * jax.process_count()
+        # consider batch distributed across nodes (mp > local devices)
+        self.node_groups = max(1, self.mp_devices // jax.local_device_count())
+        self.batch_size_dataloader = batch_size_per_node_per_step * self.node_groups
+        # local dp devices (1 when mp > local devices)
+        self.local_dp_devices = (
+            jax.local_device_count() * self.node_groups // self.mp_devices
+        )
 
     def to_dict(self):
         """
@@ -414,20 +432,17 @@ class DataTrainingArguments:
             "help": "Path to the root validation directory which contains tfrecords."
         }
     )
-    batch_size: Optional[int] = field(
-        default=64, metadata={"help": "Batch size for training."}
-    )
     image_size: Optional[int] = field(
         default=256, metadata={"help": " The size (resolution) of each image."}
     )
     min_original_image_size: Optional[int] = field(
-        default=512,
+        default=None,
         metadata={
             "help": " The minimum size (resolution) of each original image from training set."
         },
     )
     max_original_aspect_ratio: Optional[float] = field(
-        default=2.0,
+        default=None,
         metadata={
             "help": " The maximum aspect ratio of each original image from training set."
         },
@@ -548,7 +563,9 @@ def main():
         repo = Repository(training_args.output_dir, clone_from=repo_name)
 
     # Initialize datasets and pre-processing transforms
-    dataset = Dataset(**asdict(data_args))
+    dataset = Dataset(
+        batch_size=training_args.batch_size_dataloader, **asdict(data_args)
+    )
 
     # Info on local devices
     logger.info(f"Local TPUs/GPUs: {jax.local_device_count()}")
@@ -607,30 +624,15 @@ def main():
     num_epochs = training_args.num_train_epochs
     num_params = model.num_params(params_shape)
 
-    # batch size
-    batch_size_per_node_per_grad_step = (
-        data_args.batch_size * jax.local_device_count() // training_args.mp_devices
-    )
-    batch_size_per_node = (
-        batch_size_per_node_per_grad_step * training_args.gradient_accumulation_steps
-    )
-    batch_size_per_step = batch_size_per_node * jax.process_count()
-    eval_batch_size_per_node = (
-        data_args.batch_size * jax.local_device_count() // training_args.mp_devices
-    )
-    eval_batch_size_per_step = eval_batch_size_per_node * jax.process_count()
-
     # log some info
     logger.info("***** Running training *****")
     logger.info(f"  Num Epochs = {num_epochs}")
-    logger.info(
-        f"  Batch size per dp device = {training_args.per_device_train_batch_size}"
-    )
+    logger.info(f"  Batch size per node = {training_args.batch_size_per_node}")
     logger.info(f"  Number of devices = {jax.device_count()}")
     logger.info(
         f"  Gradient accumulation steps = {training_args.gradient_accumulation_steps}"
     )
-    logger.info(f"  Batch size per update = {batch_size_per_step}")
+    logger.info(f"  Batch size per update = {training_args.batch_size_per_step}")
     logger.info(f"  Model parameters = {num_params:,}")
 
     if jax.process_index() == 0:
@@ -640,7 +642,7 @@ def main():
         # add interesting config parameters
         wandb.config.update(
             {
-                "batch_size_per_step": batch_size_per_step,
+                "batch_size_per_step": training_args.batch_size_per_step,
                 "num_params": num_params,
                 "model_config": model.config.to_dict(),
                 "num_devices": jax.device_count(),
@@ -906,10 +908,7 @@ def main():
 
     # "vmap trick" avoids a crash when mp_devices > 1 (not sure why it happens)
     # lead to better perf: see https://wandb.ai/dalle-mini/dalle-mini/reports/JAX-pmap-vs-pjit--VmlldzoxNDg1ODA2
-    use_vmap_trick = training_args.use_vmap_trick
-
-    # make grad_param_spec for vmap
-    if use_vmap_trick:
+    if training_args.use_vmap_trick:
         grad_params_spec = jax.tree_map(
             lambda x: PartitionSpec(*("dp",) + (x if x is not None else (None,))),
             params_spec,
@@ -963,7 +962,7 @@ def main():
             # only 1 single rng per grad step, let us handle larger batch size (not sure why)
             dropout_rng, _ = jax.random.split(dropout_rng)
 
-            if use_vmap_trick:
+            if training_args.use_vmap_trick:
                 # "vmap trick", calculate loss and grads independently per dp_device
                 loss, grads = jax.vmap(
                     grad_fn, in_axes=(None, 0, None, None), out_axes=(0, 0)
@@ -1045,7 +1044,7 @@ def main():
             grads=grads,
             dropout_rng=dropout_rng,
             train_time=train_time,
-            train_samples=state.train_samples + batch_size_per_step,
+            train_samples=state.train_samples + training_args.batch_size_per_step,
         )
 
         metrics = {
@@ -1128,7 +1127,7 @@ def main():
                 state.params, batch, dropout_rng=None, model_fn=eval_model, train=False
             )
 
-        if use_vmap_trick:
+        if training_args.use_vmap_trick:
             loss = jax.vmap(compute_eval_loss)(batch)
             # ensure they are sharded correctly
             loss = with_sharding_constraint(loss, batch_spec)
@@ -1271,7 +1270,7 @@ def main():
                     batch = jax.tree_map(lambda x: x[jax.process_index()], batch)
 
                     # add dp dimension when using "vmap trick"
-                    if use_vmap_trick:
+                    if training_args.use_vmap_trick:
                         bs_shape = (
                             jax.local_device_count() // training_args.mp_devices,
                             training_args.per_device_eval_batch_size,
@@ -1308,12 +1307,6 @@ def main():
 
             start_save_time = time.perf_counter()
             output_dir = training_args.output_dir
-            use_bucket = output_dir.startswith("gs://")
-            if use_bucket:
-                bucket_path = Path(output_dir[5:]) / wandb.run.id / f"step_{state.step}"
-                bucket, dir_path = str(bucket_path).split("/", 1)
-                tmp_dir = tempfile.TemporaryDirectory()
-                output_dir = tmp_dir.name
 
             # save model
             params = jax.device_get(state.params)
@@ -1322,34 +1315,23 @@ def main():
                 params=params,
             )
 
-            # save tokenizer
-            tokenizer.save_pretrained(output_dir)
-
-            # copy to bucket
-            if use_bucket:
-                client = storage.Client()
-                bucket = client.bucket(bucket)
-                for filename in Path(output_dir).glob("*"):
-                    blob_name = str(Path(dir_path) / "model" / filename.name)
-                    blob = bucket.blob(blob_name)
-                    blob.upload_from_filename(str(filename))
-                tmp_dir.cleanup()
-
             # save state
             opt_state = jax.device_get(state.opt_state)
-            if use_bucket:
-                blob_name = str(Path(dir_path) / "state" / "opt_state.msgpack")
-                blob = bucket.blob(blob_name)
-                blob.upload_from_file(io.BytesIO(to_bytes(opt_state)))
-            else:
-                with (Path(output_dir) / "opt_state.msgpack").open("wb") as f:
-                    f.write(to_bytes(opt_state))
+            with (Path(output_dir) / "opt_state.msgpack").open("wb") as f:
+                f.write(to_bytes(opt_state))
+
+            # save to HF hub
+            if training_args.push_to_hub:
+                repo.push_to_hub(
+                    commit_message=f"Saving weights and logs of epoch {epoch}",
+                    blocking=False,
+                )
 
             # save to W&B
             if training_args.log_model:
                 # save some space
                 c = wandb.wandb_sdk.wandb_artifacts.get_artifacts_cache()
-                c.cleanup(wandb.util.from_human_size("20GB"))
+                c.cleanup(wandb.util.from_human_size("10GB"))
 
                 metadata = {
                     k: jax.device_get(getattr(state, k)).item()
@@ -1360,44 +1342,32 @@ def main():
                     metadata["eval"] = eval_metrics
 
                 # create model artifact
-                if use_bucket:
-                    metadata["bucket_path"] = f"gs://{bucket_path}/model"
                 artifact = wandb.Artifact(
                     name=f"model-{wandb.run.id}",
                     type="DalleBart_model",
                     metadata=metadata,
                 )
-                if use_bucket:
-                    artifact.add_reference(metadata["bucket_path"])
-                else:
-                    for filename in [
-                        "config.json",
-                        "flax_model.msgpack",
-                        "merges.txt",
-                        "special_tokens_map.json",
-                        "tokenizer.json",
-                        "tokenizer_config.json",
-                        "vocab.json",
-                    ]:
-                        artifact.add_file(
-                            f"{Path(training_args.output_dir) / filename}"
-                        )
+                for filename in [
+                    "config.json",
+                    "flax_model.msgpack",
+                    "merges.txt",
+                    "special_tokens_map.json",
+                    "tokenizer.json",
+                    "tokenizer_config.json",
+                    "vocab.json",
+                ]:
+                    artifact.add_file(f"{Path(training_args.output_dir) / filename}")
                 wandb.run.log_artifact(artifact)
 
                 # create state artifact
-                if use_bucket:
-                    metadata["bucket_path"] = f"gs://{bucket_path}/state"
                 artifact_state = wandb.Artifact(
                     name=f"state-{wandb.run.id}",
                     type="DalleBart_state",
                     metadata=metadata,
                 )
-                if use_bucket:
-                    artifact_state.add_reference(metadata["bucket_path"])
-                else:
-                    artifact_state.add_file(
-                        f"{Path(training_args.output_dir) / 'opt_state.msgpack'}"
-                    )
+                artifact_state.add_file(
+                    f"{Path(training_args.output_dir) / 'opt_state.msgpack'}"
+                )
                 wandb.run.log_artifact(artifact_state)
             metrics_logger.log_time("save_model", time.perf_counter() - start_save_time)
 
@@ -1412,40 +1382,80 @@ def main():
 
             # train
             if training_args.do_train:
-                for i, batch in enumerate(dataset.train.as_numpy_iterator()):
-                    batch = shard(batch)
-                    state, train_metric = p_train_step(state, batch)
+                for batch in tqdm(
+                    dataset.train.as_numpy_iterator(),
+                    desc="Training...",
+                    position=1,
+                    leave=False,
+                    disable=jax.process_index() > 0,
+                ):
+                    # calculate delta time (we have a lag of one step but it's ok)
+                    train_time = time.perf_counter() - start_time
 
-                    if jax.process_index() == 0:
-                        if i % training_args.logging_steps == 0:
-                            metrics = unreplicate(train_metric)
-                            wandb.log(metrics)
+                    # reset control variables
+                    evaluation_ran = False
+                    save_model_ran = False
 
-                        if i % training_args.save_steps == 0:
-                            params = jax.device_get(
-                                jax.tree_map(lambda x: x[0], state.params)
-                            )
-                            model.save_pretrained(
-                                training_args.output_dir, params=params
-                            )
-
-                train_metric = unreplicate(train_metric)
-
-                train_step_progress_bar.close()
-                epochs.write(
-                    f"Epoch... ({epoch + 1}/{num_epochs} | Loss: {train_metric['loss']}, Learning Rate:"
-                    f" {train_metric['learning_rate']})"
-                )
-
-            # save checkpoint after each epoch and push checkpoint to the hub
-            if jax.process_index() == 0 and ((epoch + 1) % 10 == 0):
-                params = jax.device_get(jax.tree_map(lambda x: x[0], state.params))
-                model.save_pretrained(training_args.output_dir, params=params)
-                if training_args.push_to_hub:
-                    repo.push_to_hub(
-                        commit_message=f"Saving weights and logs of epoch {epoch}",
-                        blocking=False,
+                    # set correct shape to batch
+                    bs_shape = (
+                        (training_args.batch_size_per_node * training_args.node_groups,)
+                        if not training_args.use_vmap_trick
+                        else (
+                            training_args.local_dp_devices,
+                            training_args.per_device_train_batch_size,
+                        )
                     )
+                    if training_args.gradient_accumulation_steps > 1:
+                        # reshape data into (gradient_accumulation_steps, batch_per_node, ...)
+                        # to avoid any data redistribution when sharding
+                        bs_shape = (
+                            training_args.gradient_accumulation_steps,
+                        ) + bs_shape
+
+                    # reshape batch
+                    batch = jax.tree_map(
+                        lambda x: x.reshape(bs_shape + x.shape[1:]),
+                        batch,
+                    )
+
+                    # train step
+                    state, train_metrics = p_train_step(state, batch, train_time)
+                    local_state["step"] += 1
+                    local_state["train_time"] = train_time
+                    local_state["train_samples"] += batch_size_per_step
+
+                    if (
+                        local_state["step"] % training_args.logging_steps == 0
+                        and jax.process_index() == 0
+                    ):
+                        metrics_logger.update_state_metrics(local_state)
+                        metrics_logger.log(train_metrics, prefix="train")
+
+                    eval_metrics = None
+                    if local_state["step"] % training_args.eval_steps == 0:
+                        eval_metrics = run_evaluation()
+                        evaluation_ran = True
+
+                    if local_state["step"] % training_args.save_steps == 0:
+                        run_save_model(state, eval_metrics)
+                        save_model_ran = True
+
+                # log final train metrics
+                if train_metrics is not None:
+                    metrics_logger.update_state_metrics(local_state)
+                    metrics_logger.log(train_metrics, prefix="train")
+
+                    epochs.write(
+                        f"Epoch... ({epoch + 1}/{num_epochs} | Loss: {train_metrics['loss']}, Learning Rate: {train_metrics['learning_rate']})"
+                    )
+
+            # Final evaluation at the end of each epoch
+            if not evaluation_ran:
+                eval_metrics = run_evaluation()
+
+            # save checkpoint after each epoch
+            if not save_model_ran:
+                run_save_model(state, eval_metrics)
 
 
 if __name__ == "__main__":
