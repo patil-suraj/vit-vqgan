@@ -140,3 +140,15 @@ class Dataset:
                 ds = ds.map(_normalize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
                 ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
                 setattr(self, dataset, ds)
+
+
+def logits_to_image(logits, format="rgb"):
+    logits = logits.clip(-1.0, 1.0)
+    if format == "rgb":
+        logits = (logits + 1.0) / 2.0
+    else:
+        bias = [-1.0, 0.0, 0.0]
+        scale = [50.0, 128.0, 128.0]
+        logits = (logits - bias) * scale
+        logits = tfio.experimental.color.lab_to_rgb(logits)
+    return logits
