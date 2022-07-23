@@ -8,6 +8,7 @@ from enum import Enum
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
+
 import flax
 import jax
 import jax.numpy as jnp
@@ -21,6 +22,7 @@ from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.serialization import from_bytes, to_bytes
 from huggingface_hub import Repository
 from jax.experimental import PartitionSpec, maps
+from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
 from lpips_j.lpips import LPIPS
 from tqdm import tqdm
@@ -34,6 +36,8 @@ from vit_vqgan.data import Dataset
 # from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
 
 logger = logging.getLogger(__name__)
+
+cc.initialize_cache("jax_cache")
 
 
 @dataclass
