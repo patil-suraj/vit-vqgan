@@ -9,6 +9,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
 
+from functools import partial
 import flax
 import jax
 import jax.numpy as jnp
@@ -545,7 +546,6 @@ def main():
     # Set up model config
     if model_args.config_name:
         config = ViTVQConfig.from_pretrained(model_args.config_name)
-        config.gradient_checkpointing = training_args.gradient_checkpointing
     else:
         config = None
 
@@ -557,7 +557,6 @@ def main():
             seed=training_args.seed_model,
             dtype=getattr(jnp, model_args.dtype),
             _do_init=False,  # we overwrite them with loaded checkpoint
-            gradient_checkpointing=training_args.gradient_checkpointing,
         )
     else:
         model = ViTVQModel(
@@ -567,6 +566,9 @@ def main():
             _do_init=False,
         )
         params = None
+
+    # overwrite certain config parameters
+    model.config.gradient_checkpointing = training_args.gradient_checkpointing
 
     # get model metadata
     model_metadata = model_args.get_metadata()
@@ -741,10 +743,10 @@ def main():
         # get PartitionSpec
         if training_args.optim == "adam":
 
-            def _opt_state_spec_per_leaf(x):
+            def _opt_state_spec_per_leaf(x, spec):
                 if isinstance(x, FrozenDict):
                     # variables with same structure as params
-                    return params_spec
+                    return spec
                 else:
                     # other variables such as count
                     return None
@@ -753,7 +755,7 @@ def main():
                 None
                 if params_spec is None
                 else jax.tree_util.tree_map(
-                    _opt_state_spec_per_leaf,
+                    partial(_opt_state_spec_per_leaf, spec=params_spec),
                     opt_state_shape,
                     # return None spec for empty elements
                     is_leaf=lambda x: isinstance(x, (FrozenDict, optax.EmptyState)),
