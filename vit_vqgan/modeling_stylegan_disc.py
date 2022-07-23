@@ -22,6 +22,7 @@ from numpy import block
 from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel
 
 from .configuration_stylegan_disc import StyleGANDiscriminatorConfig
+from .utils import PretrainedFromWandbMixin
 
 ActivationFunction = Callable[[jnp.ndarray], jnp.ndarray]
 
@@ -300,7 +301,6 @@ class StyleGANDiscriminatorModule(nn.Module):
         self.classifier = nn.Dense(1, dtype=self.dtype)
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-
         y = self.conv_in(x)
         y = self.activation_function(y)
 
@@ -342,7 +342,14 @@ class StyleGANDiscriminatorPreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ):
         module = self.module_class(config=config, **kwargs)
-        super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype, _do_init=_do_init)
+        super().__init__(
+            config,
+            module,
+            input_shape=input_shape,
+            seed=seed,
+            dtype=dtype,
+            _do_init=_do_init,
+        )
 
     def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple) -> FrozenDict:
         # init input tensors
@@ -370,5 +377,5 @@ class StyleGANDiscriminatorPreTrainedModel(FlaxPreTrainedModel):
         )
 
 
-class StyleGANDiscriminator(StyleGANDiscriminatorPreTrainedModel):
+class StyleGANDiscriminator(PretrainedFromWandbMixin, StyleGANDiscriminatorPreTrainedModel):
     module_class = StyleGANDiscriminatorModule

@@ -4,12 +4,18 @@ from typing import Tuple
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-from flax.core.frozen_dict import FrozenDict
+from flax.core.frozen_dict import FrozenDict, unfreeze
+from flax.linen import partitioning as nn_partitioning
 from flax.linen.attention import dot_product_attention_weights
 from flax.linen.initializers import variance_scaling
+from flax.traverse_util import flatten_dict
 from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel
 
 from .configuration_vit_vqgan import ViTVQConfig
+from .utils import PretrainedFromWandbMixin
+
+remat = nn_partitioning.remat
+
 
 ACT2FN["tanh"] = nn.tanh
 
@@ -47,12 +53,23 @@ def to_image(patches, patch_size):
     batch, num_patches, channels = patches.shape
     patch_height = patch_width = int(num_patches**0.5)
     image_size = patch_height * patch_size
-
     patches = patches.reshape(batch, patch_height, patch_width, channels)
     patches = patches.reshape(batch, patch_height, patch_width, patch_size, patch_size, -1)
     patches = patches.transpose(0, 1, 3, 2, 4, 5)
     patches = patches.reshape(batch, image_size, image_size, -1)
     return patches
+
+
+def patch_1D_to_2D(patch):
+    _, n_patches, dim = patch.shape
+    w_h = int(n_patches**0.5)
+    assert w_h * w_h == n_patches
+    return patch.reshape((-1, w_h, w_h, dim))
+
+
+def patch_2D_to_1D(patch):
+    _, w_h, _, dim = patch.shape
+    return patch.reshape((-1, w_h * w_h, dim))
 
 
 class ConvPatches(nn.Module):
@@ -62,15 +79,14 @@ class ConvPatches(nn.Module):
     def setup(self):
         embed_dim = self.config.hidden_size
         patch_size = self.config.patch_size
-
         self.to_patches = nn.Conv(
             embed_dim,
             kernel_size=(patch_size, patch_size),
             strides=(patch_size, patch_size),
             padding="VALID",
-            use_bias=False,
+            use_bias=self.config.use_bias,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(),
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
 
     def __call__(self, pixel_values):
@@ -83,22 +99,55 @@ class ConvPatches(nn.Module):
 class FeedForwardLayer(nn.Module):
     dim1: int
     dim2: int
-    activation: str = "relu"
+    activation: str
+    config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
-    def setup(self):
-        self.activation_fn = ACT2FN[self.activation]
-        self.fc1 = nn.Dense(
+    @nn.compact
+    def __call__(self, x, deterministic: bool = True):
+        x = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(x)
+        hidden_states = nn.Dense(
             self.dim1,
+            use_bias=self.config.use_bias,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
-        )
-        self.fc2 = nn.Dense(self.dim2, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
-
-    def __call__(self, hidden_states):
-        hidden_states = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(hidden_states)
-        hidden_states = self.fc2(hidden_states)
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+            name="fc1",
+        )(x)
+        hidden_states = ACT2FN[self.activation](hidden_states)
+        if self.config.use_glu:
+            hidden_states *= nn.Dense(
+                self.dim1,
+                use_bias=self.config.use_bias,
+                dtype=self.dtype,
+                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+                name="fc1_glu",
+            )(x)
+        if self.config.mid_ffn_conv:
+            # suggestion from Katherine Crowson
+            hidden_states = patch_1D_to_2D(hidden_states)
+            hidden_states = nn.Conv(
+                self.embed_dim,
+                kernel_size=(3, 3),
+                strides=(1, 1),
+                padding="SAME",
+                feature_group_count=self.embed_dim,
+                use_bias=self.config.use_bias,
+                dtype=self.dtype,
+                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+                name="conv",
+            )(hidden_states)
+            hidden_states = patch_2D_to_1D(hidden_states)
+        if self.config.ln_positions == "normformer":
+            hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(hidden_states)
+        hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
+        hidden_states = nn.Dense(
+            self.dim2,
+            use_bias=self.config.use_bias,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+            name="fc2",
+        )(hidden_states)
+        hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
         return hidden_states
 
 
@@ -118,10 +167,42 @@ class Attention(nn.Module):
         self.scale = self.head_dim**-0.5
         self.dropout = self.config.attention_dropout
 
-        self.k_proj = nn.Dense(self.embed_dim, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
-        self.v_proj = nn.Dense(self.embed_dim, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
-        self.q_proj = nn.Dense(self.embed_dim, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
-        self.out_proj = nn.Dense(self.embed_dim, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
+        self.k_proj = nn.Dense(
+            self.embed_dim,
+            use_bias=self.config.use_bias,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+        )
+        self.v_proj = nn.Dense(
+            self.embed_dim,
+            use_bias=self.config.use_bias,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+        )
+        self.q_proj = nn.Dense(
+            self.embed_dim,
+            use_bias=self.config.use_bias,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+        )
+        self.out_proj = nn.Dense(
+            self.embed_dim,
+            use_bias=self.config.use_bias,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+        )
+        if self.config.post_attention_conv:
+            # suggestion from Phil Wang
+            self.conv = nn.Conv(
+                self.embed_dim,
+                kernel_size=(3, 3),
+                strides=(1, 1),
+                padding="SAME",
+                feature_group_count=self.embed_dim,
+                use_bias=self.config.use_bias,
+                dtype=self.dtype,
+                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+            )
 
     def _split_heads(self, hidden_states):
         return hidden_states.reshape(hidden_states.shape[:2] + (self.num_heads, self.head_dim))
@@ -156,6 +237,10 @@ class Attention(nn.Module):
         attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value)
         attn_output = self._merge_heads(attn_output)
         attn_output = self.out_proj(attn_output)
+        if self.config.post_attention_conv:
+            attn_output = patch_1D_to_2D(attn_output)
+            attn_output = self.conv(attn_output)
+            attn_output = patch_2D_to_1D(attn_output)
 
         return attn_output
 
@@ -164,27 +249,26 @@ class TransformerBlock(nn.Module):
     config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
-    def setup(self):
-        self.self_attn = Attention(self.config, dtype=self.dtype)
-        self.layer_norm1 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
-        self.feed_forward = FeedForwardLayer(
-            dim1=self.config.intermediate_size,
-            dim2=self.config.hidden_size,
-            activation=self.config.hidden_act,
-            dtype=self.dtype,
-        )
-        self.layer_norm2 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
-
+    @nn.compact
     def __call__(self, hidden_states, deterministic: bool = True):
         residual = hidden_states
 
-        hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(hidden_states=hidden_states, deterministic=deterministic)
+        hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(hidden_states)
+        hidden_states = Attention(self.config, dtype=self.dtype)(
+            hidden_states=hidden_states, deterministic=deterministic
+        )
+        if self.config.ln_positions == "normformer":
+            hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
-        hidden_states = self.layer_norm2(hidden_states)
-        hidden_states = self.feed_forward(hidden_states)
+        hidden_states = FeedForwardLayer(
+            dim1=self.config.intermediate_size,
+            dim2=self.config.hidden_size,
+            activation=self.config.hidden_act,
+            config=self.config,
+            dtype=self.dtype,
+        )(hidden_states, deterministic=deterministic)
         hidden_states = residual + hidden_states
 
         return hidden_states
@@ -195,9 +279,15 @@ class Transformer(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        self.layers = [
-            TransformerBlock(self.config, name=str(i), dtype=self.dtype) for i in range(self.config.num_hidden_layers)
-        ]
+        layer = (
+            remat(
+                TransformerBlock,
+            )
+            if self.config.gradient_checkpointing
+            else TransformerBlock
+        )
+
+        self.layers = [layer(self.config, name=str(i), dtype=self.dtype) for i in range(self.config.num_hidden_layers)]
 
     def __call__(self, hidden_states, deterministic: bool = True):
         for layer in self.layers:
@@ -217,9 +307,16 @@ class VitEncoder(nn.Module):
         else:
             self.to_patches = partial(to_patches, patch_size=self.config.patch_size)
 
-        self.embed = nn.Dense(self.config.hidden_size, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01))
+        self.embed = nn.Dense(
+            self.config.hidden_size,
+            use_bias=self.config.use_bias,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+        )
         self.position_embedding = nn.Embed(
-            num_patches, self.config.hidden_size, embedding_init=jax.nn.initializers.normal()
+            num_patches,
+            self.config.hidden_size,
+            embedding_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
         self.position_ids = jnp.expand_dims(jnp.arange(0, num_patches, dtype="i4"), axis=0)
 
@@ -242,7 +339,9 @@ class VitDecoder(nn.Module):
 
         self.position_ids = jnp.expand_dims(jnp.arange(0, num_patches, dtype="i4"), axis=0)
         self.position_embeddings = nn.Embed(
-            num_patches, self.config.hidden_size, embedding_init=jax.nn.initializers.normal()
+            num_patches,
+            self.config.hidden_size,
+            embedding_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
         self.transformer = Transformer(self.config, dtype=self.dtype)
 
@@ -270,9 +369,11 @@ class VectorQuantizer(nn.Module):
     def setup(self):
         embed_init = variance_scaling(1.0, "fan_in", "normal", out_axis=0)
         self.embedding = self.param(
-            "embedding", embed_init, (self.config.n_embed, self.config.codebook_embed_dim), self.dtype
+            "embedding",
+            embed_init,
+            (self.config.n_embed, self.config.codebook_embed_dim),
+            self.dtype,
         )
-        self.beta = self.config.commitment_cost
 
     def __call__(self, hidden_states):
         """
@@ -285,17 +386,17 @@ class VectorQuantizer(nn.Module):
             2. flatten input to (B*H*W,C)
         """
         #  flatten
-        hidden_states_flattended = hidden_states.reshape((-1, self.config.codebook_embed_dim))
+        hidden_states_flattened = hidden_states.reshape((-1, self.config.codebook_embed_dim))
 
         # normalize `z` here `hidden_states` and codebook latent variable `e` (here `embedding`)
-        hidden_states_flattended = l2_normalize(hidden_states_flattended, axis=1)
+        hidden_states_flattened = l2_normalize(hidden_states_flattened, axis=1)
         embedding = l2_normalize(self.embedding, axis=1)
 
         # distances from z to embeddings e_j (z - e)^2 = z^2 + e^2 - 2 e * z
         distance = (
-            jnp.sum(hidden_states_flattended**2, axis=1, keepdims=True)
+            jnp.sum(hidden_states_flattened**2, axis=1, keepdims=True)
             + jnp.sum(embedding**2, axis=1)
-            - 2 * jnp.dot(hidden_states_flattended, embedding.T)
+            - 2 * jnp.dot(hidden_states_flattened, embedding.T)
         )
 
         # get quantized latent vectors
@@ -307,14 +408,13 @@ class VectorQuantizer(nn.Module):
         hidden_states_normed = l2_normalize(hidden_states, axis=-1)
         e_latent_loss = jnp.mean(jnp.square(jax.lax.stop_gradient(z_q) - hidden_states_normed))
         q_latent_loss = jnp.mean(jnp.square(z_q - jax.lax.stop_gradient(hidden_states_normed)))
-        loss = q_latent_loss + self.beta * e_latent_loss
 
         # Straight Through Estimator
         z_q = hidden_states + jax.lax.stop_gradient(z_q - hidden_states)
 
-        return z_q, min_encoding_indices, loss
+        return z_q, min_encoding_indices, (q_latent_loss, e_latent_loss)
 
-    def get_codebook_entry(self, indices, shape=None):
+    def get_codebook_entry(self, indices):
         # indices are expected to be of shape (batch, num_tokens)
         # get quantized latent vectors
         z_q = jnp.take(self.embedding, indices, axis=0)
@@ -332,16 +432,28 @@ class VitVQModule(nn.Module):
         self.latent_size = self.config.image_size // self.config.patch_size
 
         self.encoder = VitEncoder(self.config, dtype=self.dtype)
-        self.factor_in = FeedForwardLayer(
-            dim1=self.config.intermediate_size,
-            dim2=self.config.codebook_embed_dim,
-            activation="tanh",
-            dtype=self.dtype,
-        )
+
+        if self.config.extra_projection:
+            self.factor_in = FeedForwardLayer(
+                dim1=self.config.intermediate_size,
+                dim2=self.config.codebook_embed_dim,
+                activation=self.config.extra_feed_forward_act,
+                config=self.config,
+                dtype=self.dtype,
+            )
+            self.factor_out = nn.Dense(
+                self.config.hidden_size,
+                use_bias=self.config.use_bias,
+                dtype=self.dtype,
+                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+            )
+        else:
+            self.factor_in = lambda x, _: x
+            self.factor_out = lambda x: x
+            raise NotImplemented("VectorQuantizer expected dimensions not implemented without extra projection")
+
         self.quantizer = VectorQuantizer(self.config, dtype=self.dtype)
-        self.factor_out = nn.Dense(
-            self.config.hidden_size, dtype=self.dtype, kernel_init=jax.nn.initializers.normal(0.01)
-        )
+
         self.decoder = VitDecoder(self.config, dtype=self.dtype)
 
         if self.config.use_conv_patches:
@@ -350,22 +462,23 @@ class VitVQModule(nn.Module):
                 kernel_size=(self.config.patch_size, self.config.patch_size),
                 strides=(self.config.patch_size, self.config.patch_size),
                 padding="VALID",
-                use_bias=False,
+                use_bias=self.config.use_bias,
                 dtype=self.dtype,
-                kernel_init=jax.nn.initializers.normal(),
+                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             )
         else:
             self.to_patches = FeedForwardLayer(
                 dim1=self.config.intermediate_size,
                 dim2=input_dim,
                 activation="tanh",
+                config=self.config,
                 dtype=self.dtype,
             )
 
     def encode(self, pixel_values, deterministic: bool = True):
         hidden_states = self.encoder(pixel_values, deterministic=deterministic)
-        hidden_states = self.factor_in(hidden_states)
-        quant_states, indices, _ = self.quantize(hidden_states)
+        hidden_states = self.factor_in(hidden_states, deterministic=deterministic)
+        quant_states, indices, _ = self.quantizer(hidden_states)
         return quant_states, indices
 
     def decode(self, hidden_states, deterministic: bool = True):
@@ -376,7 +489,7 @@ class VitVQModule(nn.Module):
         return pixel_values
 
     def decode_code(self, code_b):
-        hidden_states = self.quantize.get_codebook_entry(code_b)
+        hidden_states = self.quantizer.get_codebook_entry(code_b)
         pixel_values = self.decode(hidden_states)
         return pixel_values
 
@@ -386,8 +499,8 @@ class VitVQModule(nn.Module):
 
         # 2. Project the embeddings to the codebook embedding space and quantize
         # this corresponds to the factorized codebook from the paper https://arxiv.org/abs/2110.04627 section 3.2
-        hidden_states = self.factor_in(hidden_states)
-        hidden_states, _, loss = self.quantizer(hidden_states)
+        hidden_states = self.factor_in(hidden_states, deterministic=deterministic)
+        hidden_states, _, losses = self.quantizer(hidden_states)
 
         # 3. Project the quantized embeddings back to the original space
         hidden_states = self.factor_out(hidden_states)
@@ -404,7 +517,7 @@ class VitVQModule(nn.Module):
             patches = self.to_patches(hidden_states)
             pixel_values = to_image(patches, self.config.patch_size)
 
-        return pixel_values, loss
+        return pixel_values, losses
 
 
 class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):
@@ -427,26 +540,60 @@ class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ):
         module = self.module_class(config=config, dtype=dtype, **kwargs)
-        super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype, _do_init=_do_init)
+        super().__init__(
+            config,
+            module,
+            input_shape=input_shape,
+            seed=seed,
+            dtype=dtype,
+            _do_init=_do_init,
+        )
 
     def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple) -> FrozenDict:
         # init input tensors
-        input_shape = (1, self.config.image_size, self.config.image_size, self.config.num_channels)
+        input_shape = (
+            1,
+            self.config.image_size,
+            self.config.image_size,
+            self.config.num_channels,
+        )
         pixel_values = jnp.zeros(input_shape, dtype=jnp.float32)
         params_rng, dropout_rng = jax.random.split(rng)
         rngs = {"params": params_rng, "dropout": dropout_rng}
 
         return self.module.init(rngs, pixel_values)["params"]
 
-    def encode(self, pixel_values, params: dict = None, dropout_rng: jax.random.PRNGKey = None, train: bool = False):
+    def num_params(self, params=None):
+        if params is None:
+            params = self.params
+        num_params = jax.tree_util.tree_map(lambda param: param.size, flatten_dict(unfreeze(params))).values()
+        return sum(list(num_params))
+
+    def encode(
+        self,
+        pixel_values,
+        params: dict = None,
+        dropout_rng: jax.random.PRNGKey = None,
+        train: bool = False,
+    ):
         # Handle any PRNG if needed
         rngs = {"dropout": dropout_rng} if dropout_rng is not None else {}
 
         return self.module.apply(
-            {"params": params or self.params}, jnp.array(pixel_values), not train, rngs=rngs, method=self.module.encode
+            {"params": params or self.params},
+            jnp.array(pixel_values),
+            not train,
+            rngs=rngs,
+            method=self.module.encode,
         )
 
-    def decode(self, hidden_states, params: dict = None, dropout_rng: jax.random.PRNGKey = None, train: bool = False):
+    def decode(
+        self,
+        hidden_states,
+        params: dict = None,
+        dropout_rng: jax.random.PRNGKey = None,
+        train: bool = False,
+    ):
         # Handle any PRNG if needed
         rngs = {"dropout": dropout_rng} if dropout_rng is not None else {}
 
@@ -460,7 +607,9 @@ class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):
 
     def decode_code(self, indices, params: dict = None):
         return self.module.apply(
-            {"params": params or self.params}, jnp.array(indices, dtype="i4"), method=self.module.decode_code
+            {"params": params or self.params},
+            jnp.array(indices, dtype="i4"),
+            method=self.module.decode_code,
         )
 
     def __call__(
@@ -481,5 +630,5 @@ class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):
         )
 
 
-class ViTVQModel(ViTVQGANPreTrainedModel):
+class ViTVQModel(PretrainedFromWandbMixin, ViTVQGANPreTrainedModel):
     module_class = VitVQModule
