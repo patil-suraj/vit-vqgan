@@ -299,34 +299,22 @@ class VitEncoder(nn.Module):
     config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
-    def setup(self):
-        num_patches = (self.config.image_size // self.config.patch_size) ** 2
-
-        if self.config.use_conv_patches:
-            self.to_patches = ConvPatches(self.config, dtype=self.dtype)
-        else:
-            self.to_patches = partial(to_patches, patch_size=self.config.patch_size)
-
-        self.embed = nn.Dense(
-            self.config.hidden_size,
-            use_bias=self.config.use_bias,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-        )
-        self.position_embedding = nn.Embed(
-            num_patches,
-            self.config.hidden_size,
-            embedding_init=jax.nn.initializers.normal(self.config.initializer_range),
-        )
-        self.position_ids = jnp.expand_dims(jnp.arange(0, num_patches, dtype="i4"), axis=0)
-
-        self.transformer = Transformer(self.config, dtype=self.dtype)
-
+    @nn.compact
     def __call__(self, pixel_values, deterministic: bool = True):
-        patches = self.to_patches(pixel_values)
-        hidden_states = self.embed(patches)
-        hidden_states = hidden_states + self.position_embedding(self.position_ids)
-        hidden_states = self.transformer(hidden_states, deterministic=deterministic)
+        if self.config.use_conv_patches:
+            hidden_states = ConvPatches(self.config, dtype=self.dtype)(pixel_values)
+        else:
+            hidden_states = partial(to_patches, patch_size=self.config.patch_size)(pixel_values)
+            hidden_states = nn.Dense(
+                self.config.hidden_size,
+                use_bias=self.config.use_bias,
+                dtype=self.dtype,
+                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+            )(hidden_states)
+        assert hidden_states.ndim == 3
+
+        hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
+        hidden_states = Transformer(self.config, dtype=self.dtype)(hidden_states, deterministic=deterministic)
         return hidden_states
 
 
@@ -334,6 +322,7 @@ class VitDecoder(nn.Module):
     config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
+    @nn.compact
     def setup(self):
         num_patches = (self.config.image_size // self.config.patch_size) ** 2
 
@@ -345,8 +334,15 @@ class VitDecoder(nn.Module):
         )
         self.transformer = Transformer(self.config, dtype=self.dtype)
 
+    @nn.compact
     def __call__(self, hidden_states, deterministic: bool = True):
-        hidden_states = hidden_states + self.position_embeddings(self.position_ids)
+        assert hidden_states.ndim == 3
+        position_embeddings = self.param(
+            "pos_embedding",
+            jax.nn.initializers.normal(self.config.initializer_range),
+            (1, 1, hidden_states.shape[1], hidden_states.shape[2]),
+        )
+        hidden_states += position_embeddings
         hidden_states = self.transformer(hidden_states, deterministic=deterministic)
         return hidden_states
 
