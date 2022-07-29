@@ -473,6 +473,7 @@ class VitVQModule(nn.Module):
 
     def encode(self, pixel_values, deterministic: bool = True):
         hidden_states = self.encoder(pixel_values, deterministic=deterministic)
+        hidden_states = ACT2FN[self.hidden_act](hidden_states)
         hidden_states = self.factor_in(hidden_states)
         hidden_states = self.encoder_ln(hidden_states)
         quant_states, indices, _ = self.quantizer(hidden_states)
