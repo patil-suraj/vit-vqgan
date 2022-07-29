@@ -429,7 +429,7 @@ class VitVQModule(nn.Module):
 
         self.encoder = VitEncoder(self.config, dtype=self.dtype)
 
-        if self.config.extra_projection:
+        if self.config.codebook_projection:
             self.factor_in = nn.Dense(
                 self.config.codebook_embed_dim,
                 use_bias=self.config.use_bias,
@@ -443,7 +443,7 @@ class VitVQModule(nn.Module):
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             )
         else:
-            self.factor_in = lambda x, _: x
+            self.factor_in = lambda x: x
             self.factor_out = lambda x: x
             raise NotImplemented("VectorQuantizer expected dimensions not implemented without extra projection")
 
@@ -469,10 +469,12 @@ class VitVQModule(nn.Module):
                 config=self.config,
                 dtype=self.dtype,
             )
+        self.encoder_ln = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype, use_scale=False)
 
     def encode(self, pixel_values, deterministic: bool = True):
         hidden_states = self.encoder(pixel_values, deterministic=deterministic)
         hidden_states = self.factor_in(hidden_states)
+        hidden_states = self.encoder_ln(hidden_states)
         quant_states, indices, _ = self.quantizer(hidden_states)
         return quant_states, indices
 
