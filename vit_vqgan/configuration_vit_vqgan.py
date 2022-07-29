@@ -30,11 +30,10 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         use_glu=False,
         hidden_act="relu",
         extra_projection=True,
-        extra_feed_forward_act="tanh",
         layer_norm_eps=0.00001,
         dropout=0.0,
         attention_dropout=0.0,
-        initializer_range=0.01,
+        initializer_range=0.02,
         use_bias=False,
         ln_positions="preln",  # preln, normformer
         gradient_checkpointing=True,

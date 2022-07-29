@@ -430,12 +430,11 @@ class VitVQModule(nn.Module):
         self.encoder = VitEncoder(self.config, dtype=self.dtype)
 
         if self.config.extra_projection:
-            self.factor_in = FeedForwardLayer(
-                dim1=self.config.intermediate_size,
-                dim2=self.config.codebook_embed_dim,
-                activation=self.config.extra_feed_forward_act,
-                config=self.config,
+            self.factor_in = nn.Dense(
+                self.config.codebook_embed_dim,
+                use_bias=self.config.use_bias,
                 dtype=self.dtype,
+                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             )
             self.factor_out = nn.Dense(
                 self.config.hidden_size,
@@ -466,14 +465,14 @@ class VitVQModule(nn.Module):
             self.to_patches = FeedForwardLayer(
                 dim1=self.config.intermediate_size,
                 dim2=input_dim,
-                activation="tanh",
+                activation=self.config.hidden_act,
                 config=self.config,
                 dtype=self.dtype,
             )
 
     def encode(self, pixel_values, deterministic: bool = True):
         hidden_states = self.encoder(pixel_values, deterministic=deterministic)
-        hidden_states = self.factor_in(hidden_states, deterministic=deterministic)
+        hidden_states = self.factor_in(hidden_states)
         quant_states, indices, _ = self.quantizer(hidden_states)
         return quant_states, indices
 
