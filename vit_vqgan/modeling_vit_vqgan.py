@@ -166,7 +166,7 @@ class GLU(nn.Module):
         )
 
         hidden_gelu = Dense(features=self.dim1, name="fc1")(hidden_states)
-        hidden_gelu = ACT2FN[self.config.hidden_act](hidden_gelu)
+        hidden_gelu = ACT2FN[self.activation](hidden_gelu)
 
         hidden_linear = Dense(features=self.dim1, name="fc2")(hidden_states)
 
