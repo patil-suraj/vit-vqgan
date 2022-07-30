@@ -29,12 +29,11 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         mid_ffn_conv=False,
         use_glu=False,
         hidden_act="relu",
-        extra_projection=True,
-        extra_feed_forward_act="tanh",
+        codebook_projection=True,
         layer_norm_eps=0.00001,
         dropout=0.0,
         attention_dropout=0.0,
-        initializer_range=0.01,
+        initializer_range=0.02,
         use_bias=False,
         ln_positions="preln",  # preln, normformer
         gradient_checkpointing=True,
@@ -65,8 +64,7 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         self.attention_dropout = attention_dropout
         self.layer_norm_eps = layer_norm_eps
         self.hidden_act = hidden_act
-        self.extra_projection = extra_projection
-        self.extra_feed_forward_act = extra_feed_forward_act
+        self.codebook_projection = codebook_projection
         self.use_bias = use_bias
         self.ln_positions = ln_positions
         self.gradient_checkpointing = gradient_checkpointing
