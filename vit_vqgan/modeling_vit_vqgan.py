@@ -145,7 +145,7 @@ class FeedForwardLayer(nn.Module):
         return hidden_states
 
 
-class GeGLU(nn.Module):
+class GLU(nn.Module):
     dim1: int
     dim2: int
     activation: str
@@ -166,7 +166,7 @@ class GeGLU(nn.Module):
         )
 
         hidden_gelu = Dense(features=self.dim1, name="fc1")(hidden_states)
-        hidden_gelu = nn.gelu(hidden_gelu)
+        hidden_gelu = ACT2FN[self.config.hidden_act](hidden_gelu)
 
         hidden_linear = Dense(features=self.dim1, name="fc2")(hidden_states)
 
@@ -297,7 +297,7 @@ class TransformerBlock(nn.Module):
             hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(hidden_states)
         hidden_states = residual + hidden_states
 
-        FFN = GeGLU if self.config.use_glu else FeedForwardLayer
+        FFN = GLU if self.config.use_glu else FeedForwardLayer
         residual = hidden_states
         hidden_states = FFN(
             dim1=self.config.intermediate_size,
