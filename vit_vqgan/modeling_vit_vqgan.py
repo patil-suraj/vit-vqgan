@@ -76,21 +76,21 @@ class ConvPatches(nn.Module):
     config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
-    def setup(self):
+    @nn.compact
+    def __call__(self, pixel_values):
         embed_dim = self.config.hidden_size
         patch_size = self.config.patch_size
-        self.to_patches = nn.Conv(
+
+        patch_embeds = nn.Conv(
             embed_dim,
             kernel_size=(patch_size, patch_size),
             strides=(patch_size, patch_size),
             padding="VALID",
             use_bias=self.config.use_bias,
             dtype=self.dtype,
+            name="patch_embeds",
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-        )
-
-    def __call__(self, pixel_values):
-        patch_embeds = self.to_patches(pixel_values)
+        )(pixel_values)
         batch_size, height, width, channels = patch_embeds.shape
         patch_embeds = jnp.reshape(patch_embeds, (batch_size, height * width, channels))
         return patch_embeds
@@ -104,24 +104,20 @@ class FeedForwardLayer(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     @nn.compact
-    def __call__(self, x, deterministic: bool = True):
-        x = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(x)
-        hidden_states = nn.Dense(
-            self.dim1,
+    def __call__(self, hidden_states, deterministic: bool = True):
+        Dense = partial(
+            nn.Dense,
             use_bias=self.config.use_bias,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-            name="fc1",
-        )(x)
+        )
+
+        hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype, name="layernorm_0")(
+            hidden_states
+        )
+        hidden_states = Dense(features=self.dim1, name="fc1")(hidden_states)
         hidden_states = ACT2FN[self.activation](hidden_states)
-        if self.config.use_glu:
-            hidden_states *= nn.Dense(
-                self.dim1,
-                use_bias=self.config.use_bias,
-                dtype=self.dtype,
-                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-                name="fc1_glu",
-            )(x)
+
         if self.config.mid_ffn_conv:
             # suggestion from Katherine Crowson
             hidden_states = patch_1D_to_2D(hidden_states)
@@ -134,19 +130,71 @@ class FeedForwardLayer(nn.Module):
                 use_bias=self.config.use_bias,
                 dtype=self.dtype,
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-                name="conv",
+                name="mid_ffn_conv",
             )(hidden_states)
             hidden_states = patch_2D_to_1D(hidden_states)
+
         if self.config.ln_positions == "normformer":
-            hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(hidden_states)
+            hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype, name="layernorm_1")(
+                hidden_states
+            )
+
         hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
-        hidden_states = nn.Dense(
-            self.dim2,
+        hidden_states = Dense(features=self.dim2, name="fc2")(hidden_states)
+        hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
+        return hidden_states
+
+
+class GLU(nn.Module):
+    dim1: int
+    dim2: int
+    activation: str
+    config: ViTVQConfig
+    dtype: jnp.dtype = jnp.float32
+
+    @nn.compact
+    def __call__(self, hidden_states, deterministic: bool = True):
+        Dense = partial(
+            nn.Dense,
             use_bias=self.config.use_bias,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-            name="fc2",
-        )(hidden_states)
+        )
+
+        hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype, name="layernorm_0")(
+            hidden_states
+        )
+
+        hidden_gelu = Dense(features=self.dim1, name="fc1")(hidden_states)
+        hidden_gelu = ACT2FN[self.activation](hidden_gelu)
+
+        hidden_linear = Dense(features=self.dim1, name="fc2")(hidden_states)
+
+        hidden_states = hidden_gelu * hidden_linear
+
+        if self.config.mid_ffn_conv:
+            # suggestion from Katherine Crowson
+            hidden_states = patch_1D_to_2D(hidden_states)
+            hidden_states = nn.Conv(
+                self.embed_dim,
+                kernel_size=(3, 3),
+                strides=(1, 1),
+                padding="SAME",
+                feature_group_count=self.embed_dim,
+                use_bias=self.config.use_bias,
+                dtype=self.dtype,
+                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+                name="mid_ffn_conv",
+            )(hidden_states)
+            hidden_states = patch_2D_to_1D(hidden_states)
+
+        if self.config.ln_positions == "normformer":
+            hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype, name="layernorm_1")(
+                hidden_states
+            )
+
+        hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
+        hidden_states = Dense(features=self.dim2, name="fc_out")(hidden_states)
         hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
         return hidden_states
 
@@ -167,33 +215,20 @@ class Attention(nn.Module):
         self.scale = self.head_dim**-0.5
         self.dropout = self.config.attention_dropout
 
-        self.k_proj = nn.Dense(
+        Dense = partial(
+            nn.Dense,
             self.embed_dim,
             use_bias=self.config.use_bias,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
-        self.v_proj = nn.Dense(
-            self.embed_dim,
-            use_bias=self.config.use_bias,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-        )
-        self.q_proj = nn.Dense(
-            self.embed_dim,
-            use_bias=self.config.use_bias,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-        )
-        self.out_proj = nn.Dense(
-            self.embed_dim,
-            use_bias=self.config.use_bias,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-        )
+
+        self.q_proj, self.k_proj, self.v_proj = Dense(), Dense(), Dense()
+        self.out_proj = Dense()
+
         if self.config.post_attention_conv:
             # suggestion from Phil Wang
-            self.conv = nn.Conv(
+            self.post_attn_conv = nn.Conv(
                 self.embed_dim,
                 kernel_size=(3, 3),
                 strides=(1, 1),
@@ -239,7 +274,7 @@ class Attention(nn.Module):
         attn_output = self.out_proj(attn_output)
         if self.config.post_attention_conv:
             attn_output = patch_1D_to_2D(attn_output)
-            attn_output = self.conv(attn_output)
+            attn_output = self.post_attn_conv(attn_output)
             attn_output = patch_2D_to_1D(attn_output)
 
         return attn_output
@@ -257,12 +292,14 @@ class TransformerBlock(nn.Module):
         hidden_states = Attention(self.config, dtype=self.dtype)(
             hidden_states=hidden_states, deterministic=deterministic
         )
+
         if self.config.ln_positions == "normformer":
             hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(hidden_states)
         hidden_states = residual + hidden_states
 
+        FFN = GLU if self.config.use_glu else FeedForwardLayer
         residual = hidden_states
-        hidden_states = FeedForwardLayer(
+        hidden_states = FFN(
             dim1=self.config.intermediate_size,
             dim2=self.config.hidden_size,
             activation=self.config.hidden_act,
@@ -279,13 +316,7 @@ class Transformer(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        layer = (
-            remat(
-                TransformerBlock,
-            )
-            if self.config.gradient_checkpointing
-            else TransformerBlock
-        )
+        layer = remat(TransformerBlock) if self.config.gradient_checkpointing else TransformerBlock
 
         self.layers = [layer(self.config, name=str(i), dtype=self.dtype) for i in range(self.config.num_hidden_layers)]
 
@@ -309,6 +340,7 @@ class VitEncoder(nn.Module):
                 self.config.hidden_size,
                 use_bias=self.config.use_bias,
                 dtype=self.dtype,
+                name="to_hidden",
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             )(hidden_states)
         assert hidden_states.ndim == 3
@@ -362,7 +394,7 @@ class VectorQuantizer(nn.Module):
     def setup(self):
         embed_init = variance_scaling(1.0, "fan_in", "normal", out_axis=0)
         self.embedding = self.param(
-            "embedding",
+            "codebook_embedding",
             embed_init,
             (self.config.n_embed, self.config.codebook_embed_dim),
             self.dtype,
@@ -425,28 +457,24 @@ class VitVQModule(nn.Module):
         self.latent_size = self.config.image_size // self.config.patch_size
 
         self.encoder = VitEncoder(self.config, dtype=self.dtype)
-
-        if self.config.codebook_projection:
-            self.factor_in = nn.Dense(
-                self.config.codebook_embed_dim,
-                use_bias=self.config.use_bias,
-                dtype=self.dtype,
-                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-            )
-            self.factor_out = nn.Dense(
-                self.config.hidden_size,
-                use_bias=self.config.use_bias,
-                dtype=self.dtype,
-                kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
-            )
-        else:
-            self.factor_in = lambda x: x
-            self.factor_out = lambda x: x
-            raise NotImplemented("VectorQuantizer expected dimensions not implemented without extra projection")
+        self.decoder = VitDecoder(self.config, dtype=self.dtype)
 
         self.quantizer = VectorQuantizer(self.config, dtype=self.dtype)
 
-        self.decoder = VitDecoder(self.config, dtype=self.dtype)
+        self.factor_in = nn.Dense(
+            self.config.codebook_embed_dim,
+            use_bias=self.config.use_bias,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+        )
+        self.factor_out = nn.Dense(
+            self.config.hidden_size,
+            use_bias=self.config.use_bias,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
+        )
+
+        self.encoder_ln = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype, use_scale=False)
 
         if self.config.use_conv_patches:
             self.to_image = nn.ConvTranspose(
@@ -466,37 +494,21 @@ class VitVQModule(nn.Module):
                 config=self.config,
                 dtype=self.dtype,
             )
-        self.encoder_ln = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype, use_scale=False)
 
     def encode(self, pixel_values, deterministic: bool = True):
-        hidden_states = self.encoder(pixel_values, deterministic=deterministic)
-        hidden_states = ACT2FN[self.hidden_act](hidden_states)
-        hidden_states = self.factor_in(hidden_states)
-        hidden_states = self.encoder_ln(hidden_states)
-        quant_states, indices, _ = self.quantizer(hidden_states)
-        return quant_states, indices
-
-    def decode(self, hidden_states, deterministic: bool = True):
-        hidden_states = self.factor_out(hidden_states)
-        hidden_states = self.decoder(hidden_states, deterministic=deterministic)
-        patches = self.to_patches(hidden_states)
-        pixel_values = to_image(patches, self.config.patch_size)
-        return pixel_values
-
-    def decode_code(self, code_b):
-        hidden_states = self.quantizer.get_codebook_entry(code_b)
-        pixel_values = self.decode(hidden_states)
-        return pixel_values
-
-    def __call__(self, pixel_values, deterministic: bool = True):
         # 1. create patches and encode
         hidden_states = self.encoder(pixel_values, deterministic=deterministic)
+        hidden_states = ACT2FN[self.config.hidden_act](hidden_states)
 
         # 2. Project the embeddings to the codebook embedding space and quantize
         # this corresponds to the factorized codebook from the paper https://arxiv.org/abs/2110.04627 section 3.2
-        hidden_states = self.factor_in(hidden_states, deterministic=deterministic)
-        hidden_states, _, losses = self.quantizer(hidden_states)
+        hidden_states = self.factor_in(hidden_states)
+        hidden_states = self.encoder_ln(hidden_states)
+        quant_states, indices, losses = self.quantizer(hidden_states)
 
+        return quant_states, indices, losses
+
+    def decode(self, hidden_states, deterministic: bool = True):
         # 3. Project the quantized embeddings back to the original space
         hidden_states = self.factor_out(hidden_states)
 
@@ -512,6 +524,16 @@ class VitVQModule(nn.Module):
             patches = self.to_patches(hidden_states)
             pixel_values = to_image(patches, self.config.patch_size)
 
+        return pixel_values
+
+    def decode_code(self, code_b):
+        hidden_states = self.quantizer.get_codebook_entry(code_b)
+        pixel_values = self.decode(hidden_states)
+        return pixel_values
+
+    def __call__(self, pixel_values, deterministic: bool = True):
+        quant_states, _, losses = self.encode(pixel_values, deterministic=deterministic)
+        pixel_values = self.decode(quant_states, deterministic=deterministic)
         return pixel_values, losses
 
 
