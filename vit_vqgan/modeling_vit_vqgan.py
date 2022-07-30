@@ -313,6 +313,14 @@ class VitEncoder(nn.Module):
             )(hidden_states)
         assert hidden_states.ndim == 3
 
+        num_patches = (self.config.image_size // self.config.patch_size) ** 2
+        position_embeddings = self.param(
+            "pos_embedding",
+            jax.nn.initializers.normal(self.config.initializer_range),
+            (1, num_patches, self.config.hidden_size),
+        )
+        hidden_states += position_embeddings
+
         hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
         hidden_states = Transformer(self.config, dtype=self.dtype)(hidden_states, deterministic=deterministic)
         return hidden_states
