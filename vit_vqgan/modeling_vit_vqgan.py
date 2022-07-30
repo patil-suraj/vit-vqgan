@@ -323,27 +323,16 @@ class VitDecoder(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     @nn.compact
-    def setup(self):
-        num_patches = (self.config.image_size // self.config.patch_size) ** 2
-
-        self.position_ids = jnp.expand_dims(jnp.arange(0, num_patches, dtype="i4"), axis=0)
-        self.position_embeddings = nn.Embed(
-            num_patches,
-            self.config.hidden_size,
-            embedding_init=jax.nn.initializers.normal(self.config.initializer_range),
-        )
-        self.transformer = Transformer(self.config, dtype=self.dtype)
-
-    @nn.compact
     def __call__(self, hidden_states, deterministic: bool = True):
         assert hidden_states.ndim == 3
+        num_patches = (self.config.image_size // self.config.patch_size) ** 2
         position_embeddings = self.param(
             "pos_embedding",
             jax.nn.initializers.normal(self.config.initializer_range),
-            (1, 1, hidden_states.shape[1], hidden_states.shape[2]),
+            (1, num_patches, self.config.hidden_size),
         )
         hidden_states += position_embeddings
-        hidden_states = self.transformer(hidden_states, deterministic=deterministic)
+        hidden_states = Transformer(self.config, dtype=self.dtype)(hidden_states, deterministic=deterministic)
         return hidden_states
 
 
