@@ -114,9 +114,9 @@ def vanilla_d_loss(logits_real, logits_fake):
 
 
 def generator_train_step(train_state: TrainState, batch):
-    def loss_fn():
+    def loss_fn(generator_params):
         predicted_images, (q_latent_loss, e_latent_loss) = generator(
-            batch, params=train_state.generator_params, dropout_rng=train_state.dropout_rng, train=True
+            batch, params=generator_params, dropout_rng=train_state.dropout_rng, train=True
         )
 
         # TODO: replace l1 with logit laplace
@@ -144,26 +144,26 @@ def generator_train_step(train_state: TrainState, batch):
         return loss
 
     grad_fn = jax.value_and_grad(loss_fn)
-    loss, grads = grad_fn()
+    loss, grads = grad_fn(train_state.generator_params)
     return loss, train_state.apply_gradients_generator(grads)
 
 
 def discriminator_train_step(train_state: TrainState, batch):
-    def loss_fn():
+    def loss_fn(discriminator_params):
         predicted_images, _ = generator(
             batch, params=train_state.generator_params, dropout_rng=train_state.dropout_rng, train=True
         )
 
         # run discriminator
-        logits_real = discriminator(batch, params=train_state.discriminator_params, train=True)
-        logits_fake = discriminator(predicted_images, params=train_state.discriminator_params, train=True)
+        logits_real = discriminator(batch, params=discriminator_params, train=True)
+        logits_fake = discriminator(predicted_images, params=discriminator_params, train=True)
 
         disc_factor = 1.0  # TODO: make this an argument
         loss = disc_factor * vanilla_d_loss(logits_real, logits_fake)
         return loss
 
     grad_fn = jax.value_and_grad(loss_fn)
-    loss, grads = grad_fn()
+    loss, grads = grad_fn(train_state.discriminator_params)
     return loss, train_state.apply_gradients_discriminator(grads)
 
 
