@@ -1,7 +1,7 @@
 check_dirs := vit_vqgan training
 
 quality:
-	black --check --preview $(check_dirs)
+	black -l 119 --check --preview  $(check_dirs)
 	isort --check-only $(check_dirs)
 	flake8 $(check_dirs)
 
