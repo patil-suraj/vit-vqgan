@@ -158,8 +158,23 @@ def discriminator_train_step(train_state: TrainState, batch):
         logits_real = discriminator(batch, params=discriminator_params, train=True)
         logits_fake = discriminator(predicted_images, params=discriminator_params, train=True)
 
+        # Interpolate between fake and real images with epsilon
+        epsilon = jax.random.uniform(train_state.dropout_rng, shape=(batch.shape[0], 1, 1, 1))
+        interpolated = batch * epsilon + predicted_images * (1 - epsilon)
+
+        # compute the gradient penalty
+        gradients = jax.grad(discriminator.__call__)(
+            interpolated, params=train_state.discriminator_params
+        )  # grad with respect to data_mix
+        gradients = gradients.reshape((gradients.shape[0], -1))
+        grad_norm = jnp.linalg.norm(gradients, axis=1)
+        grad_penalty = ((grad_norm - 1) ** 2).mean()
+
+        grad_penalty_cost = 1.0  # TODO: make this an argument
+        grad_penalty = grad_penalty_cost * grad_penalty
+
         disc_factor = 1.0  # TODO: make this an argument
-        loss = disc_factor * vanilla_d_loss(logits_real, logits_fake)
+        loss = disc_factor * (vanilla_d_loss(logits_real, logits_fake) + grad_penalty)
         return loss
 
     grad_fn = jax.value_and_grad(loss_fn)
