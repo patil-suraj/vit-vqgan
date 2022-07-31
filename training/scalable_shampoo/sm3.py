@@ -47,9 +47,7 @@ class ParameterStats(NamedTuple):
     diagonal_momentum: QuantizedValue  # Momentum for the diagonal preconditioner
 
 
-def sm3(
-    learning_rate, beta1=0.9, beta2=0.999, diagonal_epsilon=1e-10, normalize_grads=False
-):
+def sm3(learning_rate, beta1=0.9, beta2=0.999, diagonal_epsilon=1e-10, normalize_grads=False):
     """SM3 optimizer.
 
     Memory-Efficient Adaptive Optimization, Rohan Anil, Vineet Gupta, Tomer Koren,
@@ -80,9 +78,7 @@ def sm3(
             momentum = _quantize_momentum(jnp.zeros_like(param))
             return ParameterStats(accumulators, momentum)
 
-        return SM3State(
-            count=jnp.zeros([], jnp.int32), stats=jax.tree_map(_init, params)
-        )
+        return SM3State(count=jnp.zeros([], jnp.int32), stats=jax.tree_map(_init, params))
 
     def _get_expanded_shape(shape, i):
         rank = len(shape)
@@ -121,27 +117,18 @@ def sm3(
         # [n], [m] -> [n, 1], [1, m]
         expanded_diagonal_statistics = jax.tree_map(
             lambda grad, state: [  # pylint:disable=g-long-lambda
-                jnp.reshape(
-                    state.diagonal_statistics[i], _get_expanded_shape(grad.shape, i)
-                )
-                for i in range(grad.ndim)
+                jnp.reshape(state.diagonal_statistics[i], _get_expanded_shape(grad.shape, i)) for i in range(grad.ndim)
             ],
             updates,
             stats,
         )
 
         # Compute new diagonal statistics
-        new_diagonal_statistics = jax.tree_map(
-            _moving_averages, updates, expanded_diagonal_statistics
-        )
+        new_diagonal_statistics = jax.tree_map(_moving_averages, updates, expanded_diagonal_statistics)
 
         # Compute preconditioners (1/sqrt(s)) where s is the statistics.
-        new_preconditioners = jax.tree_map(
-            lambda t: 1.0 / jnp.sqrt(t + diagonal_epsilon), new_diagonal_statistics
-        )
-        preconditioned_grads = jax.tree_map(
-            lambda g, p: g * p, updates, new_preconditioners
-        )
+        new_preconditioners = jax.tree_map(lambda t: 1.0 / jnp.sqrt(t + diagonal_epsilon), new_diagonal_statistics)
+        preconditioned_grads = jax.tree_map(lambda g, p: g * p, updates, new_preconditioners)
 
         # Compute updated momentum (also handle quantization)
         updated_momentum = jax.tree_map(
@@ -153,9 +140,7 @@ def sm3(
         )
 
         # Update diagonal statistics.
-        updated_diagonal_statistics = jax.tree_map(
-            _sketch_diagonal_statistics, updates, new_diagonal_statistics
-        )
+        updated_diagonal_statistics = jax.tree_map(_sketch_diagonal_statistics, updates, new_diagonal_statistics)
 
         # Update momentum.
         new_sm3_stats = jax.tree_map(
