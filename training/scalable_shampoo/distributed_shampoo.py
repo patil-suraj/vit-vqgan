@@ -34,13 +34,13 @@ import itertools
 from typing import Any, Callable, List, NamedTuple, Optional, Tuple
 
 import chex
-from flax import struct
 import jax
-from jax import lax
-from jax.experimental import pjit
 import jax.numpy as jnp
 import numpy as np
 import optax
+from flax import struct
+from jax import lax
+from jax.experimental import pjit
 
 from .quantization_utils import QuantizedValue
 from .symmetric_matrices import symmetric_matrices
@@ -338,9 +338,9 @@ def pad_square_matrix(mat, max_size):
     """
     rows, cols = mat.shape
     if rows != cols:
-        raise ValueError("Must have rows == cols, instead got " f"rows={rows}, cols={cols}")
+        raise ValueError(f"Must have rows == cols, instead got rows={rows}, cols={cols}")
     if cols > max_size:
-        raise ValueError("Must have cols <= max_size. Instead got " f"cols={cols}, max_size={max_size}.")
+        raise ValueError(f"Must have cols <= max_size. Instead got cols={cols}, max_size={max_size}.")
     if rows == max_size:
         return mat
     pad_size = max_size - rows
@@ -418,7 +418,7 @@ def pad_block_symmetric_matrix(
             f"rows={rows}, symmetric_block_size={symmetric_block_size}."
         )
     if rows > cols:
-        raise ValueError("Must have rows <= cols, instead got " f"rows={rows}, cols={cols}.")
+        raise ValueError(f"Must have rows <= cols, instead got rows={rows}, cols={cols}.")
     if cols > symmetric_block_size * max_num_blocks:
         raise ValueError(
             "Must have cols <= symmetric_block_size * max_num_blocks "
@@ -509,7 +509,7 @@ class BlockPartitioner:
 
         assert tensor.shape == self._shape
         tensors = [tensor]
-        for (i, indices) in self._splits:
+        for i, indices in self._splits:
             tensors_local = []
             for t in tensors:
                 tensors_local.extend(jnp.split(t, indices_or_sections=indices, axis=i))
@@ -519,7 +519,7 @@ class BlockPartitioner:
     def merge_partitions(self, partitions):
         """Merge partitions back to original shape."""
 
-        for (i, indices) in reversed(self._splits):
+        for i, indices in reversed(self._splits):
             n = len(indices) + 1
             partial_merged_tensors = []
             ind = 0
@@ -1817,7 +1817,6 @@ def distributed_shampoo(
         sgd_update = grad
         new_diagonal_statistics = state.diagonal_statistics.to_float()
         if graft_type == GraftingType.ADAGRAD or graft_type == GraftingType.ADAGRAD_NORMALIZED:
-
             scaled_grad = grad
             if graft_type == GraftingType.ADAGRAD_NORMALIZED:
                 scaled_grad = grad / (jnp.linalg.norm(grad) + 1e-16)
@@ -1826,7 +1825,6 @@ def distributed_shampoo(
             adagrad_update = scaled_grad / (jnp.sqrt(new_diagonal_statistics) + diagonal_epsilon)
             grafting_update = adagrad_update
         elif graft_type == GraftingType.RMSPROP or graft_type == GraftingType.RMSPROP_NORMALIZED:
-
             scaled_grad = grad
             if graft_type == GraftingType.RMSPROP_NORMALIZED:
                 scaled_grad = grad / (jnp.linalg.norm(grad) + 1e-16)
