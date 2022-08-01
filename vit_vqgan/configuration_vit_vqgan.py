@@ -19,6 +19,7 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         cost_e_latent=0.25,
         cost_lpips=0.1,
         cost_stylegan=0.1,
+        cost_gradient_penalty=1.0,
         intermediate_size=768 * 4,
         num_hidden_layers=12,
         num_attention_heads=12,
@@ -47,6 +48,7 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         self.cost_e_latent = cost_e_latent
         self.cost_lpips = cost_lpips
         self.cost_stylegan = cost_stylegan
+        self.cost_gradient_penalty = cost_gradient_penalty
         self.hidden_size = hidden_size
         self.codebook_embed_dim = codebook_embed_dim
         self.n_embed = n_embed
