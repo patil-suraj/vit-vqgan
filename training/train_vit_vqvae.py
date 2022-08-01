@@ -26,15 +26,15 @@ from jax.experimental import PartitionSpec, maps
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
 from lpips_j.lpips import LPIPS
+from scalable_shampoo.distributed_shampoo import (GraftingType,
+                                                  distributed_shampoo)
 from tqdm import tqdm
 from transformers import HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
 
-from vit_vqgan import StyleGANDiscriminator, StyleGANDiscriminatorConfig, ViTVQConfig, ViTVQModel
+from vit_vqgan import (StyleGANDiscriminator, StyleGANDiscriminatorConfig,
+                       ViTVQConfig, ViTVQModel)
 from vit_vqgan.data import Dataset, logits_to_image
-
-# TODO: fix imports
-# from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
 
 logger = logging.getLogger(__name__)
 
