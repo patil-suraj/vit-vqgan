@@ -11,7 +11,7 @@ class StyleGANDiscriminatorConfig(PretrainedFromWandbMixin, PretrainedConfig):
         image_size: Union[int, Tuple[int, int]] = (256, 256),
         base_features: int = 32,
         max_hidden_feature_size: int = 512,
-        mbstd_group_size: int = None,
+        mbstd_group_size: int = 4,
         mbstd_num_features: int = 1,
         **kwargs,
     ):
