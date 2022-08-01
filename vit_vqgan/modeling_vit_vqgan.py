@@ -122,11 +122,11 @@ class FeedForwardLayer(nn.Module):
             # suggestion from Katherine Crowson
             hidden_states = patch_1D_to_2D(hidden_states)
             hidden_states = nn.Conv(
-                self.embed_dim,
+                self.dim1,
                 kernel_size=(3, 3),
                 strides=(1, 1),
                 padding="SAME",
-                feature_group_count=self.embed_dim,
+                feature_group_count=self.dim1,
                 use_bias=self.config.use_bias,
                 dtype=self.dtype,
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
@@ -176,11 +176,11 @@ class GLU(nn.Module):
             # suggestion from Katherine Crowson
             hidden_states = patch_1D_to_2D(hidden_states)
             hidden_states = nn.Conv(
-                self.embed_dim,
+                self.dim1,
                 kernel_size=(3, 3),
                 strides=(1, 1),
                 padding="SAME",
-                feature_group_count=self.embed_dim,
+                feature_group_count=self.dim1,
                 use_bias=self.config.use_bias,
                 dtype=self.dtype,
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
