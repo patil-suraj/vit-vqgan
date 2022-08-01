@@ -1073,8 +1073,9 @@ def main():
                     "loss_q_latent": 0.0,
                     "loss_e_latent": 0.0,
                     "loss_lpips": 0.0,
-                    "loss_disc": 0.0,
-                    "loss_disc_gradient_penalty": 0.0,
+                    "disc_loss": 0.0,
+                    "disc_loss_stylegan": 0.0,
+                    "disc_loss_gradient_penalty": 0.0,
                 },
             )
 
