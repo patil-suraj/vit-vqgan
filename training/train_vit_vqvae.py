@@ -913,7 +913,7 @@ def main():
             del opt_state, disc_opt_state, disc_params
 
     # free CPU memory
-    del params, opt_state_spec, opt_state_shape, disc_opt_state_spec, disc_params_spec
+    del params, opt_state_spec, opt_state_shape, disc_opt_state_spec
 
     # define batch spec
     batch_spec = PartitionSpec("dp")
@@ -925,6 +925,10 @@ def main():
         grad_params_spec = jax.tree_util.tree_map(
             lambda x: PartitionSpec(*("dp",) + (x if x is not None else (None,))),
             params_spec,
+        )
+        grad_disc_params_spec = jax.tree_util.tree_map(
+            lambda x: PartitionSpec(*("dp",) + (x if x is not None else (None,))),
+            disc_params_spec,
         )
 
     # Define loss
@@ -955,7 +959,7 @@ def main():
             "loss_lpips": model.config.cost_lpips * loss_lpips,
             "loss_stylegan": model.config.cost_stylegan * loss_disc,
         }
-        return loss, loss_details, predicted_images
+        return loss, (loss_details, predicted_images)
 
     def compute_stylegan_loss(disc_params, minibatch, predicted_images, dropout_rng, disc_model_fn, train):
         disc_fake_scores = disc_model_fn(predicted_images, params=disc_params, dropout_rng=dropout_rng, train=train)
@@ -989,8 +993,8 @@ def main():
 
             if training_args.use_vmap_trick:
                 # "vmap trick", calculate loss and grads independently per dp_device
-                (loss, loss_details, predicted_images), grads = jax.vmap(
-                    grad_fn, in_axes=(None, None, 0, None, None, None), out_axes=(0, 0, 0)
+                (loss, (loss_details, predicted_images)), grads = jax.vmap(
+                    grad_fn, in_axes=(None, None, 0, None, None, None), out_axes=(0, 0)
                 )(state.params, state.disc_params, minibatch, dropout_rng, model, disc_model)
                 # ensure they are sharded correctly
                 loss = with_sharding_constraint(loss, batch_spec)
@@ -1005,7 +1009,7 @@ def main():
                 # ensure they are sharded correctly
                 disc_loss = with_sharding_constraint(disc_loss, batch_spec)
                 disc_loss_details = with_sharding_constraint(disc_loss_details, batch_spec)
-                disc_grads = with_sharding_constraint(disc_grads, batch_spec)
+                disc_grads = with_sharding_constraint(disc_grads, grad_disc_params_spec)
 
                 # average across all devices
                 # Note: we could average per device only after gradient accumulation, right before params update
@@ -1015,7 +1019,7 @@ def main():
                 )
             else:
                 # "vmap trick" may not work in multi-hosts or require too much hbm
-                (loss, loss_details, predicted_images), grads = grad_fn(
+                (loss, (loss_details, predicted_images)), grads = grad_fn(
                     state.params, state.disc_params, minibatch, dropout_rng, model, disc_model
                 )
                 (disc_loss, disc_loss_details), disc_grads = grad_stylegan_fn(
@@ -1170,7 +1174,7 @@ def main():
     # Evaluation step
     def eval_step(state, batch):
         def compute_eval_loss(batch):
-            loss, loss_details, predicted_images = compute_loss(
+            loss, (loss_details, predicted_images) = compute_loss(
                 state.params,
                 state.disc_params,
                 batch,
