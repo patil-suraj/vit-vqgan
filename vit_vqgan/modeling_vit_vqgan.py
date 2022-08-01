@@ -316,13 +316,15 @@ class Transformer(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        layer = remat(TransformerBlock) if self.config.gradient_checkpointing else TransformerBlock
+        layer = (
+            remat(TransformerBlock, static_argnums=(1,)) if self.config.gradient_checkpointing else TransformerBlock
+        )
 
         self.layers = [layer(self.config, name=str(i), dtype=self.dtype) for i in range(self.config.num_hidden_layers)]
 
     def __call__(self, hidden_states, deterministic: bool = True):
         for layer in self.layers:
-            hidden_states = layer(hidden_states, deterministic=deterministic)
+            hidden_states = layer(hidden_states, deterministic)
         return hidden_states
 
 
