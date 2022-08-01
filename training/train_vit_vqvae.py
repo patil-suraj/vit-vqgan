@@ -31,7 +31,7 @@ from transformers import HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
 
 from vit_vqgan import StyleGANDiscriminator, StyleGANDiscriminatorConfig, ViTVQConfig, ViTVQModel
-from vit_vqgan.data import Dataset
+from vit_vqgan.data import Dataset, logits_to_image
 
 # TODO: fix imports
 # from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
@@ -153,6 +153,10 @@ class TrainingArguments:
     log_model: bool = field(
         default=False,
         metadata={"help": "Log model to wandb at `save_steps` frequency."},
+    )
+    log_n_samples: int = field(
+        default=64,
+        metadata={"help": "Number of sample predictions to log during evaluation."},
     )
     log_norm: bool = field(
         default=True,
@@ -1185,7 +1189,7 @@ def main():
                 train=False,
             )
             _, disc_loss_details = compute_stylegan_loss(
-                state.disc_params, batch, predicted_images, dropout_rng, eval_disc_model, train=False
+                state.disc_params, batch, predicted_images, None, eval_disc_model, train=False
             )
             loss_details = {**loss_details, **disc_loss_details}
             return {
@@ -1204,6 +1208,19 @@ def main():
 
         return metrics
 
+    # Inference step (to log samples)
+    def inference_step(state, batch):
+        def get_predictions(minibatch):
+            predicted_images, _ = eval_model(minibatch, params=state.params, dropout_rng=None, train=False)
+            return predicted_images
+
+        if training_args.use_vmap_trick:
+            preds = jax.vmap(get_predictions)(batch)
+        else:
+            preds = get_predictions(batch)
+
+        return preds
+
     # Create parallel version of the train and eval step
     p_train_step = pjit(
         train_step,
@@ -1220,6 +1237,7 @@ def main():
         in_axis_resources=(state_spec, batch_spec),
         out_axis_resources=None,
     )
+    p_inference_step = pjit(inference_step, in_axis_resources=(state_spec, batch_spec), out_axis_resources=batch_spec)
 
     # define metrics logger
     class MetricsLogger:
@@ -1300,8 +1318,11 @@ def main():
         if training_args.do_eval:
             start_eval_time = time.perf_counter()
             metrics = []
-            for batch in tqdm(
-                dataset.valid.as_numpy_iterator(),
+            # number of steps required to have enough samples to log
+            n_samples_step = training_args.log_n_samples / training_args.valid_batch_size_per_node
+            images, predictions = [], []
+            for i, batch in tqdm(
+                enumerate(dataset.valid.as_numpy_iterator()),
                 desc="Evaluating...",
                 position=2,
                 leave=False,
@@ -1331,12 +1352,35 @@ def main():
                 # accumulate losses async
                 metrics.append(p_eval_step(state, batch))
 
+                # add sample predictions
+                if i < n_samples_step:
+                    predictions.append(p_inference_step(state, batch))
+                    images.append(batch)
+
             # get the mean of the metrics
             metrics = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *metrics)
             metrics = jax.tree_util.tree_map(jnp.mean, metrics)
 
             # log metrics
             metrics_logger.log(metrics, prefix="valid")
+
+            # log images
+            images = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *images)
+            predictions = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *predictions)
+            # flatten images and preds
+            images, predictions = jax.tree_util.tree_map(
+                lambda x: x.reshape((-1,) + x.shape[-3:]), (images, predictions)
+            )
+            images = images[: training_args.log_n_samples]
+            predictions = predictions[: training_args.log_n_samples]
+            # convert to images
+            images = logits_to_image(images, dataset.format)
+            predictions = logits_to_image(predictions, dataset.format)
+            # log in wandb
+            if jax.process_index() == 0:
+                images = [wandb.Image(img) for img in images]
+                predictions = [wandb.Image(img) for img in predictions]
+                wandb.log({"samples/ground_truth": images, "samples/predictions": predictions})
 
             # Print metrics and update progress bar
             desc = f"Epoch... ({epoch + 1}/{num_epochs} | Valid Loss: {metrics['loss']})"
