@@ -16,7 +16,7 @@ python train_vit_vqvae.py \
     --config_name config/base/model \
     --disc_config_name config/base/discriminator \
     --do_eval --do_train \
-    --batch_size 64 \
+    --batch_size_per_node 64 \
     --format rgb \
     --optim adam \
     --learning_rate 0.001 --disc_learning_rate 0.001

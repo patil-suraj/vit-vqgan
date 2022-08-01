@@ -277,17 +277,22 @@ class TrainingArguments:
             f" parallelism ({self.mp_devices})."
         )
         self.dp_devices = jax.device_count() // self.mp_devices
-        batch_size_per_node_per_step = self.batch_size_per_node * self.gradient_accumulation_steps
-        self.batch_size_per_step = batch_size_per_node_per_step * jax.process_count()
         # consider batch distributed across nodes (mp > local devices)
         self.node_groups = max(1, self.mp_devices // jax.local_device_count())
+        # local dp devices (1 when mp > local devices)
+        self.local_dp_devices = jax.local_device_count() * self.node_groups // self.mp_devices
+        # batch sizes
+        assert self.batch_size_per_node % self.local_dp_devices == 0, (
+            f"Batch size per node ({self.batch_size_per_node}) must be divisible by number of local devices"
+            f" ({jax.local_device_count()})."
+        )
+        batch_size_per_node_per_step = self.batch_size_per_node * self.gradient_accumulation_steps
+        self.batch_size_per_step = batch_size_per_node_per_step * jax.process_count()
+        self.batch_size_per_local_dp_device = self.batch_size_per_node // self.local_dp_devices
         # define batch size for data loader
         self.train_batch_size = batch_size_per_node_per_step * self.node_groups
         self.valid_batch_size = self.batch_size_per_node * jax.process_count()
         self.valid_batch_size_per_node = self.batch_size_per_node * self.node_groups
-        # local dp devices (1 when mp > local devices)
-        self.local_dp_devices = jax.local_device_count() * self.node_groups // self.mp_devices
-        self.batch_size_per_local_dp_device = self.batch_size_per_node // self.local_dp_devices
 
     def to_dict(self):
         """
