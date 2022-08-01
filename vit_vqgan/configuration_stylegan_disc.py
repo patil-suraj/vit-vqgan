@@ -13,8 +13,9 @@ class StyleGANDiscriminatorConfig(PretrainedFromWandbMixin, PretrainedConfig):
         max_hidden_feature_size: int = 512,
         mbstd_group_size: int = None,
         mbstd_num_features: int = 1,
+        **kwargs,
     ):
-        super().__init__()
+        super().__init__(**kwargs)
         self.image_size = image_size
         self.base_features = base_features
         self.max_hidden_feature_size = max_hidden_feature_size

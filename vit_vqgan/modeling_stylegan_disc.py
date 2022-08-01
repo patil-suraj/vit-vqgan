@@ -202,7 +202,7 @@ class DiscriminatorBlock(nn.Module):
         return (y + residual) / sqrt(2)
 
 
-def _get_num_features(base_features: int, image_size: Tuple[int, int], max_hidded_feature_size: int) -> List[int]:
+def _get_num_features(base_features: int, image_size: Tuple[int, int], max_hidden_feature_size: int) -> List[int]:
     """
     Gets number of features for the blocks. Each block includes a downsampling
     step by a factor of two and at the end, we want the resolution to be
@@ -221,7 +221,7 @@ def _get_num_features(base_features: int, image_size: Tuple[int, int], max_hidde
     num_blocks = int(log2(shortest_side)) - 1
     num_features = (base_features * (2**i) for i in range(num_blocks))
     # we want to bring it down to 4x4 at the end of the last block
-    return [min(n, max_hidded_feature_size) for n in num_features]
+    return [min(n, max_hidden_feature_size) for n in num_features]
 
 
 class StyleGANDiscriminatorModule(nn.Module):
@@ -266,7 +266,7 @@ class StyleGANDiscriminatorModule(nn.Module):
 
         size_t: Tuple[int, int] = (
             image_size
-            if isinstance(image_size, tuple)
+            if isinstance(image_size, (tuple, list))
             else (
                 image_size,
                 image_size,
