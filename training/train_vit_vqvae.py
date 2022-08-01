@@ -841,7 +841,14 @@ def main():
         # TODO: replace l1 with logit laplace
         loss_l1 = jnp.mean(jnp.abs(predicted_images - minibatch))
         loss_l2 = jnp.mean((predicted_images - minibatch) ** 2)
-        loss_lpips = jnp.mean(lpips_fn.apply(state.lpips_params, minibatch, predicted_images))
+        loss_lpips = jnp.mean(
+            lpips_fn.apply(
+                state.lpips_params,
+                dataset.for_lpips(minibatch),
+                dataset.for_lpips(predicted_images),
+            )
+        )
+
         loss = (
             model.config.cost_l1 * loss_l1
             + model.config.cost_l2 * loss_l2
