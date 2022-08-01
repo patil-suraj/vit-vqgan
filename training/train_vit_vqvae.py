@@ -966,11 +966,24 @@ def main():
         return loss, (loss_details, predicted_images)
 
     def compute_stylegan_loss(disc_params, minibatch, predicted_images, dropout_rng, disc_model_fn, train):
+
         disc_fake_scores = disc_model_fn(predicted_images, params=disc_params, dropout_rng=dropout_rng, train=train)
         disc_real_scores = disc_model_fn(minibatch, params=disc_params, dropout_rng=dropout_rng, train=train)
-        disc_loss = jnp.mean(nn.softplus(disc_fake_scores) + nn.softplus(-disc_real_scores))
-        # TODO: add gradient penalty r1: https://github.com/NVlabs/stylegan2/blob/bf0fe0baba9fc7039eae0cac575c1778be1ce3e3/training/loss.py#L63-L67
-        disc_loss_details = {"loss_disc": disc_loss, "loss_disc_gradient_penalty": 0.0}
+        disc_loss_stylegan = jnp.mean(nn.softplus(disc_fake_scores) + nn.softplus(-disc_real_scores))
+
+        # gradient penalty r1: https://github.com/NVlabs/stylegan2/blob/bf0fe0baba9fc7039eae0cac575c1778be1ce3e3/training/loss.py#L63-L67
+        r1_grads = jax.grad(
+            lambda p: jnp.mean(disc_model_fn(minibatch, params=p, dropout_rng=dropout_rng, train=train))
+        )(disc_params)
+        gradient_penalty = jnp.mean(jnp.square(r1_grads))
+
+        disc_loss = disc_loss_stylegan + model.config.cost_gradient_penalty * gradient_penalty
+
+        disc_loss_details = {
+            "disc_loss": disc_loss,
+            "disc_loss_stylegan": disc_loss_stylegan,
+            "disc_loss_gradient_penalty": model.config.cost_gradient_penalty * gradient_penalty,
+        }
         return disc_loss, disc_loss_details
 
     # Define gradient update step fn
