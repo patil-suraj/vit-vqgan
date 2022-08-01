@@ -26,14 +26,12 @@ from jax.experimental import PartitionSpec, maps
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
 from lpips_j.lpips import LPIPS
-from scalable_shampoo.distributed_shampoo import (GraftingType,
-                                                  distributed_shampoo)
+from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
 from transformers import HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
 
-from vit_vqgan import (StyleGANDiscriminator, StyleGANDiscriminatorConfig,
-                       ViTVQConfig, ViTVQModel)
+from vit_vqgan import StyleGANDiscriminator, StyleGANDiscriminatorConfig, ViTVQConfig, ViTVQModel
 from vit_vqgan.data import Dataset, logits_to_image
 
 logger = logging.getLogger(__name__)
@@ -759,11 +757,13 @@ def main():
             disc_opt_state_spec = pspec_fn(disc_params_spec, disc_opt_state_shape)
 
         elif training_args.optim == "distributed_shampoo":
+            params_spec = jax.tree_util.tree_map(lambda x: PartitionSpec(None), params_shape)
             opt_state_spec = opt_fn.pspec_fn(
                 params_shape,
                 params_spec,
                 statistics_partition_spec,
             )
+            disc_params_spec = jax.tree_util.tree_map(lambda x: PartitionSpec(None), disc_params_shape)
             disc_opt_state_spec = disc_opt_fn.pspec_fn(
                 disc_params_shape,
                 disc_params_spec,
