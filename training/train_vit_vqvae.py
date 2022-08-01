@@ -21,17 +21,20 @@ import wandb
 from flax import core, struct
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.serialization import from_bytes, to_bytes
+from flax.traverse_util import flatten_dict
 from huggingface_hub import Repository
 from jax.experimental import PartitionSpec, maps
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
 from lpips_j.lpips import LPIPS
-from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
+from scalable_shampoo.distributed_shampoo import (GraftingType,
+                                                  distributed_shampoo)
 from tqdm import tqdm
 from transformers import HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
 
-from vit_vqgan import StyleGANDiscriminator, StyleGANDiscriminatorConfig, ViTVQConfig, ViTVQModel
+from vit_vqgan import (StyleGANDiscriminator, StyleGANDiscriminatorConfig,
+                       ViTVQConfig, ViTVQModel)
 from vit_vqgan.data import Dataset, logits_to_image
 
 logger = logging.getLogger(__name__)
@@ -966,7 +969,6 @@ def main():
         return loss, (loss_details, predicted_images)
 
     def compute_stylegan_loss(disc_params, minibatch, predicted_images, dropout_rng, disc_model_fn, train):
-
         disc_fake_scores = disc_model_fn(predicted_images, params=disc_params, dropout_rng=dropout_rng, train=train)
         disc_real_scores = disc_model_fn(minibatch, params=disc_params, dropout_rng=dropout_rng, train=train)
         disc_loss_stylegan = jnp.mean(nn.softplus(disc_fake_scores) + nn.softplus(-disc_real_scores))
@@ -975,14 +977,16 @@ def main():
         r1_grads = jax.grad(
             lambda p: jnp.mean(disc_model_fn(minibatch, params=p, dropout_rng=dropout_rng, train=train))
         )(disc_params)
-        gradient_penalty = jnp.mean(jnp.square(r1_grads))
+        # get the squares of gradients
+        r1_grads = flatten_dict(unfreeze(r1_grads))
+        r1_grads = jax.tree_util.tree_map(lambda x: jnp.sum(x**2), r1_grads)
+        r1_grads = sum(list(r1_grads.values()))
 
-        disc_loss = disc_loss_stylegan + model.config.cost_gradient_penalty * gradient_penalty
-
+        disc_loss = disc_loss_stylegan + model.config.cost_gradient_penalty * r1_grads
         disc_loss_details = {
             "disc_loss": disc_loss,
             "disc_loss_stylegan": disc_loss_stylegan,
-            "disc_loss_gradient_penalty": model.config.cost_gradient_penalty * gradient_penalty,
+            "disc_loss_gradient_penalty": model.config.cost_gradient_penalty * r1_grads,
         }
         return disc_loss, disc_loss_details
 
