@@ -1101,6 +1101,7 @@ def main():
         metrics = {
             "loss": loss,
             "learning_rate": learning_rate_fn(state.step),
+            "disc_learning_rate": disc_learning_rate_fn(state.step),
             **loss_details,
         }
 
@@ -1183,7 +1184,7 @@ def main():
                 disc_model_fn=eval_disc_model,
                 train=False,
             )
-            disc_loss_details = compute_stylegan_loss(
+            _, disc_loss_details = compute_stylegan_loss(
                 state.disc_params, batch, predicted_images, dropout_rng, eval_disc_model, train=False
             )
             loss_details = {**loss_details, **disc_loss_details}
