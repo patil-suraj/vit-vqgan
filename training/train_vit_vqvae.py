@@ -30,8 +30,7 @@ from tqdm import tqdm
 from transformers import HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
 
-from vit_vqgan import (StyleGANDiscriminator, StyleGANDiscriminatorConfig,
-                       ViTVQConfig, ViTVQModel)
+from vit_vqgan import StyleGANDiscriminator, StyleGANDiscriminatorConfig, ViTVQConfig, ViTVQModel
 from vit_vqgan.data import Dataset
 
 # TODO: fix imports
@@ -840,13 +839,13 @@ def main():
         return lpips_fn.init(rng, x, x)
 
     # init params if not available yet
-    def maybe_init_params(params):
+    def maybe_init_params(params, m):
         if params is not None:
             # model params are correctly loaded
             return params
         else:
             # params have not been initialized yet
-            return model.init_weights(model.key, model.input_shape)
+            return m.init_weights(m.key, m.input_shape)
 
     with mesh:
         logger.info("  Creating state")
@@ -863,8 +862,8 @@ def main():
             def init_state(params, disc_params):
                 lpips_params = init_lpips(rng, data_args.image_size)
                 return TrainState.create(
-                    params=maybe_init_params(params),
-                    disc_params=maybe_init_params(disc_params),
+                    params=maybe_init_params(params, model),
+                    disc_params=maybe_init_params(disc_params, disc_model),
                     lpips_params=lpips_params,
                     dropout_rng=dropout_rng,
                     **attr_state,
@@ -1016,7 +1015,9 @@ def main():
                 )
             else:
                 # "vmap trick" may not work in multi-hosts or require too much hbm
-                (loss, loss_details, predicted_images), grads = grad_fn(state.params, minibatch, dropout_rng, model)
+                (loss, loss_details, predicted_images), grads = grad_fn(
+                    state.params, state.disc_params, minibatch, dropout_rng, model, disc_model
+                )
                 (disc_loss, disc_loss_details), disc_grads = grad_stylegan_fn(
                     state.disc_params, minibatch, predicted_images, dropout_rng, disc_model
                 )
