@@ -4,7 +4,6 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import tensorflow as tf
 import tensorflow_io as tfio
 
@@ -151,7 +150,7 @@ class Dataset:
 
 
 def logits_to_image(logits, format="rgb"):
-    logits = jnp.asarray(logits, dtype=np.float32)
+    logits = jnp.asarray(logits, dtype=jnp.float32)
     logits = logits.clip(-1.0, 1.0)
     if format == "rgb":
         logits = (logits + 1.0) / 2.0
