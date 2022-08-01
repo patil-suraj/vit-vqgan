@@ -18,11 +18,13 @@ import jax
 import jax.nn as jnn
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
-from numpy import block
-from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel
+from flax.linen import partitioning as nn_partitioning
+from transformers.modeling_flax_utils import FlaxPreTrainedModel
 
 from .configuration_stylegan_disc import StyleGANDiscriminatorConfig
 from .utils import PretrainedFromWandbMixin
+
+remat = nn_partitioning.remat
 
 ActivationFunction = Callable[[jnp.ndarray], jnp.ndarray]
 
@@ -283,9 +285,10 @@ class StyleGANDiscriminatorModule(nn.Module):
         self.conv_in = nn.Conv(base_features, kernel_size=(1, 1), padding="SAME", dtype=self.dtype)
 
         blocks = []
+        layer = remat(DiscriminatorBlock) if self.config.gradient_checkpointing else DiscriminatorBlock
         for _, (n_in, n_out) in enumerate(zip(self.num_features[1:], self.num_features)):
             blocks.append(
-                DiscriminatorBlock(
+                layer(
                     n_in,
                     n_out,
                     activation_function=self.activation_function,

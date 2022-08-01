@@ -37,7 +37,7 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         initializer_range=0.02,
         use_bias=False,
         ln_positions="preln",  # preln, normformer
-        gradient_checkpointing=True,
+        gradient_checkpointing=False,
         **kwargs
     ):
         super().__init__(**kwargs)
