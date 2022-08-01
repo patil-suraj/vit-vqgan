@@ -19,5 +19,5 @@ python train_vit_vqvae.py \
     --batch_size 64 \
     --format rgb \
     --optim adam \
-    --learning_rate 0.001 --disc_leaning_rate 0.001
+    --learning_rate 0.001 --disc_learning_rate 0.001
 ```
