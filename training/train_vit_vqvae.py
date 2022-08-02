@@ -983,7 +983,7 @@ def main():
             lambda x: jnp.mean(disc_model_fn(x, params=disc_params, dropout_rng=dropout_rng, train=train))
         )(minibatch)
         # get the squares of gradients
-        r1_grads = jnp.sum(r1_grads**2)
+        r1_grads = jnp.mean(r1_grads**2)
 
         disc_loss = disc_loss_stylegan + model.config.cost_gradient_penalty * r1_grads
         disc_loss_details = {
