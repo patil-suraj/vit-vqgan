@@ -21,7 +21,8 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         cost_stylegan=0.1,
         cost_gradient_penalty=1.0,
         intermediate_size=768 * 4,
-        num_hidden_layers=12,
+        num_encoder_layers=12,
+        num_decoder_layers=12,
         num_attention_heads=12,
         image_size=256,
         num_channels=3,
@@ -54,7 +55,8 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         self.n_embed = n_embed
         self.intermediate_size = intermediate_size
         self.dropout = dropout
-        self.num_hidden_layers = num_hidden_layers
+        self.num_encoder_layers = num_encoder_layers
+        self.num_decoder_layers = num_decoder_layers
         self.num_attention_heads = num_attention_heads
         self.patch_size = patch_size
         self.use_conv_patches = use_conv_patches

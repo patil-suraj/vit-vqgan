@@ -312,6 +312,7 @@ class TransformerBlock(nn.Module):
 
 
 class Transformer(nn.Module):
+    num_layers: int
     config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
@@ -320,7 +321,7 @@ class Transformer(nn.Module):
             remat(TransformerBlock, static_argnums=(1,)) if self.config.gradient_checkpointing else TransformerBlock
         )
 
-        self.layers = [layer(self.config, name=str(i), dtype=self.dtype) for i in range(self.config.num_hidden_layers)]
+        self.layers = [layer(self.config, name=str(i), dtype=self.dtype) for i in range(self.num_layers)]
 
     def __call__(self, hidden_states, deterministic: bool = True):
         for layer in self.layers:
@@ -356,7 +357,9 @@ class VitEncoder(nn.Module):
         hidden_states += position_embeddings
 
         hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
-        hidden_states = Transformer(self.config, dtype=self.dtype)(hidden_states, deterministic=deterministic)
+        hidden_states = Transformer(self.config.num_encoder_layers, self.config, dtype=self.dtype)(
+            hidden_states, deterministic=deterministic
+        )
         return hidden_states
 
 
@@ -374,7 +377,9 @@ class VitDecoder(nn.Module):
             (1, num_patches, self.config.hidden_size),
         )
         hidden_states += position_embeddings
-        hidden_states = Transformer(self.config, dtype=self.dtype)(hidden_states, deterministic=deterministic)
+        hidden_states = Transformer(self.config.num_decoder_layers, self.config, dtype=self.dtype)(
+            hidden_states, deterministic=deterministic
+        )
         return hidden_states
 
 
