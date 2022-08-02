@@ -156,7 +156,7 @@ class TrainingArguments:
         metadata={"help": "Log model to wandb at `save_steps` frequency."},
     )
     log_n_samples: int = field(
-        default=64,
+        default=128,
         metadata={"help": "Number of sample predictions to log during evaluation."},
     )
     log_norm: bool = field(
@@ -980,12 +980,10 @@ def main():
 
         # gradient penalty r1: https://github.com/NVlabs/stylegan2/blob/bf0fe0baba9fc7039eae0cac575c1778be1ce3e3/training/loss.py#L63-L67
         r1_grads = jax.grad(
-            lambda p: jnp.mean(disc_model_fn(minibatch, params=p, dropout_rng=dropout_rng, train=train))
-        )(disc_params)
+            lambda x: jnp.mean(disc_model_fn(x, params=disc_params, dropout_rng=dropout_rng, train=train))
+        )(minibatch)
         # get the squares of gradients
-        r1_grads = flatten_dict(unfreeze(r1_grads))
-        r1_grads = jax.tree_util.tree_map(lambda x: jnp.sum(x**2), r1_grads)
-        r1_grads = sum(list(r1_grads.values()))
+        r1_grads = jnp.sum(r1_grads**2)
 
         disc_loss = disc_loss_stylegan + model.config.cost_gradient_penalty * r1_grads
         disc_loss_details = {
