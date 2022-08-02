@@ -156,7 +156,7 @@ class TrainingArguments:
         metadata={"help": "Log model to wandb at `save_steps` frequency."},
     )
     log_n_samples: int = field(
-        default=128,
+        default=108,
         metadata={"help": "Number of sample predictions to log during evaluation."},
     )
     log_norm: bool = field(
