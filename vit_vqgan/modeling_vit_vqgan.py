@@ -396,7 +396,6 @@ class VectorQuantizer(nn.Module):
     """
 
     config: ViTVQConfig
-    dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         embed_init = variance_scaling(1.0, "fan_in", "normal", out_axis=0)
@@ -404,7 +403,7 @@ class VectorQuantizer(nn.Module):
             "codebook_embedding",
             embed_init,
             (self.config.n_embed, self.config.codebook_embed_dim),
-            self.dtype,
+            jnp.float32,
         )
 
     def __call__(self, hidden_states):
@@ -466,7 +465,7 @@ class VitVQModule(nn.Module):
         self.encoder = VitEncoder(self.config, dtype=self.dtype)
         self.decoder = VitDecoder(self.config, dtype=self.dtype)
 
-        self.quantizer = VectorQuantizer(self.config, dtype=self.dtype)
+        self.quantizer = VectorQuantizer(self.config)
 
         self.factor_in = nn.Dense(
             self.config.codebook_embed_dim,
