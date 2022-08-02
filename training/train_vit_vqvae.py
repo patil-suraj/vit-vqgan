@@ -1468,6 +1468,19 @@ def main():
                     artifact.add_file(f"{Path(training_args.output_dir) / filename}")
                 wandb.run.log_artifact(artifact)
 
+                # create discriminator model artifact
+                artifact = wandb.Artifact(
+                    name=f"disc-{wandb.run.id}",
+                    type="Discriminator",
+                    metadata=metadata,
+                )
+                for filename in [
+                    "disc/config.json",
+                    "disc/flax_model.msgpack",
+                ]:
+                    artifact.add_file(f"{Path(training_args.output_dir) / filename}")
+                wandb.run.log_artifact(artifact)
+
                 # create state artifact
                 artifact_state = wandb.Artifact(
                     name=f"state-{wandb.run.id}",
