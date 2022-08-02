@@ -556,6 +556,16 @@ def main():
         )
         disc_params = None
 
+    # check config is compatible with batch size
+    if training_args.use_vmap_trick:
+        bs_disc = training_args.batch_size_per_node // training_args.local_dp_devices
+    else:
+        bs_disc = training_args.batch_size_per_node
+    assert bs_disc % disc_model.config.mbstd_group_size == 0, (
+        f"Batch size seen by discriminator ({bs_disc}) must be divisible by mbstd_group_size"
+        f" {disc_model.config.mbstd_group_size}"
+    )
+
     # overwrite certain config parameters
     model.config.gradient_checkpointing = training_args.gradient_checkpointing
     disc_model.config.gradient_checkpointing = training_args.gradient_checkpointing
