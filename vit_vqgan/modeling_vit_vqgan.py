@@ -8,7 +8,7 @@ from flax.core.frozen_dict import FrozenDict, unfreeze
 from flax.linen import partitioning as nn_partitioning
 from flax.linen.attention import dot_product_attention_weights
 from flax.linen.initializers import variance_scaling
-from flax.traverse_util import flatten_dict
+from flax.traverse_util import flatten_dict, unflatten_dict
 from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel
 
 from .configuration_vit_vqgan import ViTVQConfig
@@ -308,6 +308,9 @@ class TransformerBlock(nn.Module):
         )(hidden_states, deterministic=deterministic)
         hidden_states = residual + hidden_states
 
+        if self.config.use_scan:
+            return hidden_states, ()
+
         return hidden_states
 
 
@@ -316,16 +319,24 @@ class Transformer(nn.Module):
     config: ViTVQConfig
     dtype: jnp.dtype = jnp.float32
 
-    def setup(self):
-        layer = (
-            remat(TransformerBlock, static_argnums=(1,)) if self.config.gradient_checkpointing else TransformerBlock
-        )
-
-        self.layers = [layer(self.config, name=str(i), dtype=self.dtype) for i in range(self.num_layers)]
-
+    @nn.compact
     def __call__(self, hidden_states, deterministic: bool = True):
-        for layer in self.layers:
-            hidden_states = layer(hidden_states, deterministic)
+        layer = (
+            remat(TransformerBlock, static_argnums=(1,), prevent_cse=not self.config.use_scan)
+            if self.config.gradient_checkpointing
+            else TransformerBlock
+        )
+        if self.config.use_scan:
+            hidden_states, _ = nn.scan(
+                layer,
+                variable_axes={"params": 0},
+                split_rngs={"params": True, "dropout": True},
+                in_axes=(nn.broadcast,),
+                length=self.num_layers,
+            )(self.config, dtype=self.dtype, name="scanned")(hidden_states, deterministic)
+        else:
+            for i in range(self.num_layers):
+                hidden_states = layer(self.config, name=str(i), dtype=self.dtype)(hidden_states, deterministic)
         return hidden_states
 
 
@@ -591,6 +602,25 @@ class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):
             params = self.params
         num_params = jax.tree_util.tree_map(lambda param: param.size, flatten_dict(unfreeze(params))).values()
         return sum(list(num_params))
+
+    def unscan(self, params):
+        if self.config.use_scan:
+            self.config.use_scan = False
+            params = flatten_dict(params)
+            scanned_keys = [k for k in params.keys() if "scanned" in k]
+            for k in scanned_keys:
+                v = params[k]
+                name_idx = k.index("scanned")
+                for i in range(len(v)):
+                    new_k = (
+                        *k[:name_idx],
+                        f"{i}",
+                        *k[name_idx + 1 :],
+                    )
+                    params[new_k] = v[i]
+                del params[k]
+            params = unflatten_dict(params)
+        return params
 
     def encode(
         self,
