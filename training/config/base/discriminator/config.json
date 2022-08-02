@@ -5,6 +5,6 @@
     256
   ],
   "max_hidden_feature_size": 512,
-  "mbstd_group_size": null,
+  "mbstd_group_size": 4,
   "mbstd_num_features": 1
 }
