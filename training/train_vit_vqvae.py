@@ -844,8 +844,8 @@ def main():
         loss_lpips = jnp.mean(
             lpips_fn.apply(
                 state.lpips_params,
-                dataset.for_lpips(minibatch),
-                dataset.for_lpips(predicted_images),
+                dataset.to_lpips(minibatch),
+                dataset.to_lpips(predicted_images),
             )
         )
 

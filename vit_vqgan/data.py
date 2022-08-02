@@ -143,8 +143,10 @@ class Dataset:
                 setattr(self, dataset, ds)
 
 
-    def for_lpips(self, batch):
+    def to_lpips(self, batch):
         # Convert to RGB in [0, 1] and remap to [-1, 1]
+        if self.format == "rgb":
+            return batch
         batch = logits_to_image(batch, format=self.format)
         return batch * 2.0 - 1.0
 
