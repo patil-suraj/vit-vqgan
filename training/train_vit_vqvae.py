@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
 
 import flax
+import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import jaxlib
@@ -20,20 +21,21 @@ import wandb
 from flax import core, struct
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.serialization import from_bytes, to_bytes
+from flax.traverse_util import flatten_dict
 from huggingface_hub import Repository
 from jax.experimental import PartitionSpec, maps
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
 from lpips_j.lpips import LPIPS
+from scalable_shampoo.distributed_shampoo import (GraftingType,
+                                                  distributed_shampoo)
 from tqdm import tqdm
 from transformers import HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
 
-from vit_vqgan import ViTVQConfig, ViTVQModel
-from vit_vqgan.data import Dataset
-
-# TODO: fix imports
-# from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
+from vit_vqgan import (StyleGANDiscriminator, StyleGANDiscriminatorConfig,
+                       ViTVQConfig, ViTVQModel)
+from vit_vqgan.data import Dataset, logits_to_image
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,7 @@ class TrainingArguments:
     )
     gradient_checkpointing: bool = field(default=False, metadata={"help": "Use gradient checkpointing."})
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate."})
+    disc_learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate."})
     optim: str = field(
         default="distributed_shampoo",
         metadata={"help": 'The optimizer to use. Can be "distributed_shampoo" (default) or "adam"'},
@@ -151,6 +154,10 @@ class TrainingArguments:
     log_model: bool = field(
         default=False,
         metadata={"help": "Log model to wandb at `save_steps` frequency."},
+    )
+    log_n_samples: int = field(
+        default=108,
+        metadata={"help": "Number of sample predictions to log during evaluation."},
     )
     log_norm: bool = field(
         default=True,
@@ -270,17 +277,22 @@ class TrainingArguments:
             f" parallelism ({self.mp_devices})."
         )
         self.dp_devices = jax.device_count() // self.mp_devices
-        batch_size_per_node_per_step = self.batch_size_per_node * self.gradient_accumulation_steps
-        self.batch_size_per_step = batch_size_per_node_per_step * jax.process_count()
         # consider batch distributed across nodes (mp > local devices)
         self.node_groups = max(1, self.mp_devices // jax.local_device_count())
+        # local dp devices (1 when mp > local devices)
+        self.local_dp_devices = jax.local_device_count() * self.node_groups // self.mp_devices
+        # batch sizes
+        assert self.batch_size_per_node % self.local_dp_devices == 0, (
+            f"Batch size per node ({self.batch_size_per_node}) must be divisible by number of local devices"
+            f" ({jax.local_device_count()})."
+        )
+        batch_size_per_node_per_step = self.batch_size_per_node * self.gradient_accumulation_steps
+        self.batch_size_per_step = batch_size_per_node_per_step * jax.process_count()
+        self.batch_size_per_local_dp_device = self.batch_size_per_node // self.local_dp_devices
         # define batch size for data loader
         self.train_batch_size = batch_size_per_node_per_step * self.node_groups
         self.valid_batch_size = self.batch_size_per_node * jax.process_count()
         self.valid_batch_size_per_node = self.batch_size_per_node * self.node_groups
-        # local dp devices (1 when mp > local devices)
-        self.local_dp_devices = jax.local_device_count() * self.node_groups // self.mp_devices
-        self.batch_size_per_local_dp_device = self.batch_size_per_node // self.local_dp_devices
 
     def to_dict(self):
         """
@@ -308,13 +320,26 @@ class ModelArguments:
         default=None,
         metadata={
             "help": (
-                "The model checkpoint for weights initialization.Don't set if you want to train a model from scratch."
+                "The model checkpoint for weights initialization. Don't set if you want to train a model from scratch."
             )
         },
     )
     config_name: Optional[str] = field(
         default=None,
         metadata={"help": "Pretrained config name or path if not the same as model_name"},
+    )
+    disc_model_name_or_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "The discriminator model checkpoint for weights initialization. Don't set if you want to train a model"
+                " from scratch."
+            )
+        },
+    )
+    disc_config_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "Pretrained discriminator config name or path if starting from scratch"},
     )
     cache_dir: Optional[str] = field(
         default=None,
@@ -348,6 +373,15 @@ class ModelArguments:
         },
     )
 
+    def __post_init__(self):
+        if self.restore_state is True:
+            assert (
+                self.model_name_or_path is not None
+            ), "If you want to restore state, you must provide a model name or path."
+            assert (
+                self.disc_model_name_or_path is not None
+            ), "If you want to restore state, you must provide a discriminator model name or path."
+
     def get_metadata(self):
         if self.model_name_or_path is not None and ":" in self.model_name_or_path:
             if jax.process_index() == 0:
@@ -368,10 +402,13 @@ class ModelArguments:
                 else:
                     artifact = wandb.Api().artifact(state_artifact)
                 artifact_dir = artifact.download(tmp_dir)
-                self.restore_state = str(Path(artifact_dir) / "opt_state.msgpack")
+                self.restore_state = Path(artifact_dir)
 
-            with Path(self.restore_state).open("rb") as f:
-                return f.read()
+            with (Path(self.restore_state) / "opt_state.msgpack").open("rb") as f:
+                opt_state = f.read()
+            with (Path(self.restore_state) / "disc_opt_state.msgpack").open("rb") as f:
+                disc_opt_state = f.read()
+            return opt_state, disc_opt_state
 
 
 @dataclass
@@ -473,13 +510,18 @@ def main():
             config=flat_args(model_args, data_args, training_args),
         )
 
-    # Set up model config
+    # Set up model configs
     if model_args.config_name:
         config = ViTVQConfig.from_pretrained(model_args.config_name)
     else:
         config = None
 
-    # Load or create new model
+    if model_args.disc_config_name:
+        disc_config = StyleGANDiscriminatorConfig.from_pretrained(model_args.disc_config_name)
+    else:
+        disc_config = None
+
+    # Load or create new models
     if model_args.model_name_or_path:
         model, params = ViTVQModel.from_pretrained(
             model_args.model_name_or_path,
@@ -497,18 +539,48 @@ def main():
         )
         params = None
 
+    if model_args.disc_model_name_or_path:
+        disc_model, disc_params = StyleGANDiscriminator.from_pretrained(
+            model_args.disc_model_name_or_path,
+            config=disc_config,
+            seed=training_args.seed_model,
+            dtype=getattr(jnp, model_args.dtype),
+            _do_init=False,  # we overwrite them with loaded checkpoint
+        )
+    else:
+        disc_model = StyleGANDiscriminator(
+            disc_config,
+            seed=training_args.seed_model,
+            dtype=getattr(jnp, model_args.dtype),
+            _do_init=False,
+        )
+        disc_params = None
+
+    # check config is compatible with batch size
+    if training_args.use_vmap_trick:
+        bs_disc = training_args.batch_size_per_node // training_args.local_dp_devices
+    else:
+        bs_disc = training_args.batch_size_per_node
+    assert bs_disc % disc_model.config.mbstd_group_size == 0, (
+        f"Batch size seen by discriminator ({bs_disc}) must be divisible by mbstd_group_size"
+        f" {disc_model.config.mbstd_group_size}"
+    )
+
     # overwrite certain config parameters
     model.config.gradient_checkpointing = training_args.gradient_checkpointing
+    disc_model.config.gradient_checkpointing = training_args.gradient_checkpointing
 
     # get model metadata
     model_metadata = model_args.get_metadata()
 
     # get PartitionSpec and shape for model params
     params_spec = None
+    disc_params_spec = None
     lpips_spec = None
     if training_args.mp_devices > 1:
         raise NotImplementedError("Model Parallelism not implemented yet")
     params_shape = freeze(model.params_shape_tree)
+    disc_params_shape = freeze(disc_model.params_shape_tree)
 
     # Initialize our training
     rng = jax.random.PRNGKey(training_args.seed_model)
@@ -550,11 +622,11 @@ def main():
         )
 
     # Create learning rate schedule
-    def create_learning_rate_fn() -> Callable[[int], jnp.array]:
+    def create_learning_rate_fn(learning_rate) -> Callable[[int], jnp.array]:
         """Create the learning rate function."""
         warmup_fn = optax.linear_schedule(
             init_value=0.0,
-            end_value=training_args.learning_rate,
+            end_value=learning_rate,
             transition_steps=training_args.warmup_steps + 1,  # ensure not 0
         )
         last_boundary = training_args.warmup_steps
@@ -576,13 +648,13 @@ def main():
                 f" {training_args.warmup_steps}"
             )
             decay_fn = optax.linear_schedule(
-                init_value=training_args.learning_rate,
+                init_value=learning_rate,
                 end_value=0,
                 transition_steps=training_args.num_train_steps - training_args.warmup_steps,
             )
         elif training_args.lr_decay == "exponential":
             decay_fn = optax.exponential_decay(
-                init_value=training_args.learning_rate,
+                init_value=learning_rate,
                 transition_steps=training_args.lr_transition_steps,
                 decay_rate=training_args.lr_decay_rate,
                 staircase=training_args.lr_staircase,
@@ -593,7 +665,8 @@ def main():
         )
         return schedule_fn
 
-    learning_rate_fn = create_learning_rate_fn()
+    learning_rate_fn = create_learning_rate_fn(training_args.learning_rate)
+    disc_learning_rate_fn = create_learning_rate_fn(training_args.disc_learning_rate)
 
     # create optimizer
     if training_args.optim == "distributed_shampoo":
@@ -611,8 +684,8 @@ def main():
             if training_args.shard_shampoo_across != "2d"
             else PartitionSpec(None, "dp", "mp")
         )
-        opt = distributed_shampoo(
-            learning_rate_fn,
+        _opt = partial(
+            distributed_shampoo,
             block_size=training_args.block_size,
             beta1=training_args.beta1,
             beta2=training_args.beta2,
@@ -644,26 +717,37 @@ def main():
             best_effort_memory_usage_reduction=training_args.optim_quantized,
         )
         # get the real optimizer and helper functions
+        opt = _opt(learning_rate_fn)
+        disc_opt = _opt(disc_learning_rate_fn)
         update_fn = opt.update
+        disc_update_fn = disc_opt.update
         optimizer = opt.init(params_shape)
+        disc_optimizer = disc_opt.init(disc_params_shape)
         opt_fn = NamedTuple("opt_fn", pspec_fn=Any, shape_and_dtype_fn=Any)(
             optimizer.pspec_fn, optimizer.shape_and_dtype_fn
         )
+        disc_opt_fn = NamedTuple("opt_fn", pspec_fn=Any, shape_and_dtype_fn=Any)(
+            disc_optimizer.pspec_fn, disc_optimizer.shape_and_dtype_fn
+        )
         optimizer = optax.GradientTransformation(optimizer.init_fn, update_fn)
+        disc_optimizer = optax.GradientTransformation(disc_optimizer.init_fn, disc_update_fn)
 
     elif training_args.optim == "adam":
-        optimizer = optax.adamw(
-            learning_rate=learning_rate_fn,
+        _opt = partial(
+            optax.adamw,
             b1=training_args.beta1,
             b2=training_args.beta2,
             eps=training_args.adam_epsilon,
             weight_decay=training_args.weight_decay,
         )
+        optimizer = _opt(learning_rate=learning_rate_fn)
+        disc_optimizer = _opt(learning_rate=disc_learning_rate_fn)
 
     # get PartitionSpec and shape of optimizer state
     def get_opt_state_spec_and_shape():
         # get opt_state shape without actual init
         opt_state_shape = jax.eval_shape(optimizer.init, params_shape)
+        disc_opt_state_shape = jax.eval_shape(disc_optimizer.init, disc_params_shape)
         # get PartitionSpec
         if training_args.optim == "adam":
 
@@ -675,27 +759,39 @@ def main():
                     # other variables such as count
                     return None
 
-            opt_state_spec = (
-                None
-                if params_spec is None
-                else jax.tree_util.tree_map(
-                    partial(_opt_state_spec_per_leaf, spec=params_spec),
-                    opt_state_shape,
-                    # return None spec for empty elements
-                    is_leaf=lambda x: isinstance(x, (FrozenDict, optax.EmptyState)),
+            def pspec_fn(spec, shape):
+                return (
+                    None
+                    if spec is None
+                    else jax.tree_util.tree_map(
+                        partial(_opt_state_spec_per_leaf, spec=spec),
+                        shape,
+                        # return None spec for empty elements
+                        is_leaf=lambda x: isinstance(x, (FrozenDict, optax.EmptyState)),
+                    )
                 )
-            )
+
+            opt_state_spec = pspec_fn(params_spec, opt_state_shape)
+            disc_opt_state_spec = pspec_fn(disc_params_spec, disc_opt_state_shape)
+
         elif training_args.optim == "distributed_shampoo":
+            params_spec = jax.tree_util.tree_map(lambda x: PartitionSpec(None), params_shape)
             opt_state_spec = opt_fn.pspec_fn(
                 params_shape,
                 params_spec,
                 statistics_partition_spec,
             )
+            disc_params_spec = jax.tree_util.tree_map(lambda x: PartitionSpec(None), disc_params_shape)
+            disc_opt_state_spec = disc_opt_fn.pspec_fn(
+                disc_params_shape,
+                disc_params_spec,
+                statistics_partition_spec,
+            )
         else:
             raise NotImplementedError
-        return opt_state_spec, opt_state_shape
+        return opt_state_spec, opt_state_shape, disc_opt_state_spec, disc_opt_state_shape
 
-    opt_state_spec, opt_state_shape = get_opt_state_spec_and_shape()
+    opt_state_spec, opt_state_shape, disc_opt_state_spec, disc_opt_state_shape = get_opt_state_spec_and_shape()
 
     # create a mesh
     mesh_shape = (training_args.dp_devices, training_args.mp_devices)
@@ -704,41 +800,51 @@ def main():
     logger.info(f"  Mesh shape: {mesh_shape}")
 
     class TrainState(struct.PyTreeNode):
-        # TODO: add separate gradients & opt_state for discriminator
         step: int
         params: core.FrozenDict[str, Any]
+        disc_params: core.FrozenDict[str, Any]
         lpips_params: core.FrozenDict[str, Any]
         opt_state: optax.OptState
+        disc_opt_state: optax.OptState
         dropout_rng: jnp.ndarray = None
         epoch: int = 0
         train_time: float = 0.0  # total time the model trained
         train_samples: int = 0  # number of samples seen
 
-        def apply_gradients(self, *, grads, **kwargs):
+        def apply_gradients(self, *, grads, disc_grads, **kwargs):
             updates, new_opt_state = optimizer.update(grads, self.opt_state, self.params)
             new_params = optax.apply_updates(self.params, updates)
+            disc_updates, new_disc_opt_state = disc_optimizer.update(disc_grads, self.disc_opt_state, self.disc_params)
+            new_disc_params = optax.apply_updates(self.disc_params, disc_updates)
             return self.replace(
                 step=self.step + 1,
                 params=new_params,
                 opt_state=new_opt_state,
+                disc_params=new_disc_params,
+                disc_opt_state=new_disc_opt_state,
                 **kwargs,
             )
 
         @classmethod
-        def create(cls, *, params, lpips_params, **kwargs):
+        def create(cls, *, params, disc_params, lpips_params, **kwargs):
             opt_state = optimizer.init(params)
+            disc_opt_state = disc_optimizer.init(disc_params)
             return cls(
                 step=0,
                 params=params,
+                disc_params=disc_params,
                 lpips_params=lpips_params,
                 opt_state=opt_state,
+                disc_opt_state=disc_opt_state,
                 **kwargs,
             )
 
     # define state spec
     state_spec = TrainState(
         params=params_spec,
+        disc_params=disc_params_spec,
         opt_state=opt_state_spec,
+        disc_opt_state=disc_opt_state_spec,
         dropout_rng=None,
         step=None,
         epoch=None,
@@ -755,13 +861,13 @@ def main():
         return lpips_fn.init(rng, x, x)
 
     # init params if not available yet
-    def maybe_init_params(params):
+    def maybe_init_params(params, m):
         if params is not None:
             # model params are correctly loaded
             return params
         else:
             # params have not been initialized yet
-            return model.init_weights(model.key, model.input_shape)
+            return m.init_weights(m.key, m.input_shape)
 
     with mesh:
         logger.info("  Creating state")
@@ -775,10 +881,11 @@ def main():
 
         if not model_args.restore_state:
 
-            def init_state(params):
+            def init_state(params, disc_params):
                 lpips_params = init_lpips(rng, data_args.image_size)
                 return TrainState.create(
-                    params=maybe_init_params(params),
+                    params=maybe_init_params(params, model),
+                    disc_params=maybe_init_params(disc_params, disc_model),
                     lpips_params=lpips_params,
                     dropout_rng=dropout_rng,
                     **attr_state,
@@ -786,20 +893,27 @@ def main():
 
             state = pjit(
                 init_state,
-                in_axis_resources=(params_spec,) if model_args.model_name_or_path else None,
+                in_axis_resources=(
+                    params_spec if model_args.model_name_or_path else None,
+                    disc_params_spec if model_args.disc_model_name_or_path else None,
+                ),
                 out_axis_resources=state_spec,
-                donate_argnums=(0,),
-            )(params)
+                donate_argnums=(0, 1),
+            )(params, disc_params)
 
         else:
             # load opt_state
-            opt_state = from_bytes(opt_state_shape, model_args.get_opt_state())
+            opt_state, disc_opt_state = model_args.get_opt_state()
+            opt_state = from_bytes(opt_state_shape, opt_state)
+            disc_opt_state = from_bytes(disc_opt_state_shape, disc_opt_state)
 
-            def restore_state(params, opt_state):
+            def restore_state(params, disc_params, opt_state, disc_opt_state):
                 lpips_params = init_lpips(rng, data_args.image_size)
                 return TrainState(
                     params=params,
+                    disc_params=disc_params,
                     opt_state=opt_state,
+                    disc_opt_state=disc_opt_state,
                     lpips_params=lpips_params,
                     dropout_rng=dropout_rng,
                     **attr_state,
@@ -809,17 +923,19 @@ def main():
                 restore_state,
                 in_axis_resources=(
                     params_spec,
+                    disc_params_spec,
                     opt_state_spec,
+                    disc_opt_state_spec,
                 ),
                 out_axis_resources=state_spec,
-                donate_argnums=(0, 1),
-            )(params, opt_state)
+                donate_argnums=(0, 1, 2, 3),
+            )(params, disc_params, opt_state, disc_opt_state)
 
             # remove opt_state from CPU
-            del opt_state
+            del opt_state, disc_opt_state, disc_params
 
     # free CPU memory
-    del params, opt_state_spec, opt_state_shape
+    del params, opt_state_spec, opt_state_shape, disc_opt_state_spec
 
     # define batch spec
     batch_spec = PartitionSpec("dp")
@@ -832,34 +948,63 @@ def main():
             lambda x: PartitionSpec(*("dp",) + (x if x is not None else (None,))),
             params_spec,
         )
+        grad_disc_params_spec = jax.tree_util.tree_map(
+            lambda x: PartitionSpec(*("dp",) + (x if x is not None else (None,))),
+            disc_params_spec,
+        )
 
     # Define loss
-    def compute_loss(params, minibatch, dropout_rng, model_fn, train):
+    def compute_loss(params, disc_params, minibatch, dropout_rng, model_fn, disc_model_fn, train):
         predicted_images, (q_latent_loss, e_latent_loss) = model_fn(
             minibatch, params=params, dropout_rng=dropout_rng, train=train
         )
-        # TODO: replace l1 with logit laplace
+        disc_fake_scores = disc_model_fn(predicted_images, params=disc_params, dropout_rng=dropout_rng, train=train)
+        loss_disc = jnp.mean(nn.softplus(-disc_fake_scores))
+        # TODO: replace l1 with logit laplace (only if necessary)
         loss_l1 = jnp.mean(jnp.abs(predicted_images - minibatch))
         loss_l2 = jnp.mean((predicted_images - minibatch) ** 2)
         loss_lpips = jnp.mean(lpips_fn.apply(state.lpips_params, minibatch, predicted_images))
+
         loss = (
             model.config.cost_l1 * loss_l1
             + model.config.cost_l2 * loss_l2
             + model.config.cost_q_latent * q_latent_loss
             + model.config.cost_e_latent * e_latent_loss
             + model.config.cost_lpips * loss_lpips
+            + model.config.cost_stylegan * loss_disc
         )
-        return loss, {
+        loss_details = {
             "loss_l1": model.config.cost_l1 * loss_l1,
             "loss_l2": model.config.cost_l2 * loss_l2,
             "loss_q_latent": model.config.cost_q_latent * q_latent_loss,
             "loss_e_latent": model.config.cost_e_latent * e_latent_loss,
             "loss_lpips": model.config.cost_lpips * loss_lpips,
+            "loss_stylegan": model.config.cost_stylegan * loss_disc,
         }
+        return loss, (loss_details, predicted_images)
+
+    def compute_stylegan_loss(disc_params, minibatch, predicted_images, dropout_rng, disc_model_fn, train):
+        disc_fake_scores = disc_model_fn(predicted_images, params=disc_params, dropout_rng=dropout_rng, train=train)
+        disc_real_scores = disc_model_fn(minibatch, params=disc_params, dropout_rng=dropout_rng, train=train)
+        disc_loss_stylegan = jnp.mean(nn.softplus(disc_fake_scores) + nn.softplus(-disc_real_scores))
+
+        # gradient penalty r1: https://github.com/NVlabs/stylegan2/blob/bf0fe0baba9fc7039eae0cac575c1778be1ce3e3/training/loss.py#L63-L67
+        r1_grads = jax.grad(
+            lambda x: jnp.mean(disc_model_fn(x, params=disc_params, dropout_rng=dropout_rng, train=train))
+        )(minibatch)
+        # get the squares of gradients
+        r1_grads = jnp.mean(r1_grads**2)
+
+        disc_loss = disc_loss_stylegan + model.config.cost_gradient_penalty * r1_grads
+        disc_loss_details = {
+            "disc_loss": disc_loss,
+            "disc_loss_stylegan": disc_loss_stylegan,
+            "disc_loss_gradient_penalty": model.config.cost_gradient_penalty * r1_grads,
+        }
+        return disc_loss, disc_loss_details
 
     # Define gradient update step fn
     def train_step(state, batch, train_time):
-
         # get a minibatch (one gradient accumulation slice)
         def get_minibatch(batch, grad_idx):
             return jax.tree_util.tree_map(
@@ -868,7 +1013,9 @@ def main():
             )
 
         train_compute_loss = partial(compute_loss, train=True)
+        train_compute_stylegan_loss = partial(compute_stylegan_loss, train=True)
         grad_fn = jax.value_and_grad(train_compute_loss, has_aux=True)
+        grad_stylegan_fn = jax.value_and_grad(train_compute_stylegan_loss, has_aux=True)
 
         def loss_and_grad(grad_idx, dropout_rng):
             # minibatch at grad_idx for gradient accumulation (None otherwise)
@@ -880,33 +1027,53 @@ def main():
 
             if training_args.use_vmap_trick:
                 # "vmap trick", calculate loss and grads independently per dp_device
-                (loss, loss_details), grads = jax.vmap(grad_fn, in_axes=(None, 0, None, None), out_axes=(0, 0))(
-                    state.params, minibatch, dropout_rng, model
-                )
+                (loss, (loss_details, predicted_images)), grads = jax.vmap(
+                    grad_fn, in_axes=(None, None, 0, None, None, None), out_axes=(0, 0)
+                )(state.params, state.disc_params, minibatch, dropout_rng, model, disc_model)
                 # ensure they are sharded correctly
                 loss = with_sharding_constraint(loss, batch_spec)
                 loss_details = with_sharding_constraint(loss_details, batch_spec)
+                predicted_images = with_sharding_constraint(predicted_images, batch_spec)
                 grads = with_sharding_constraint(grads, grad_params_spec)
+
+                # discriminator grads
+                (disc_loss, disc_loss_details), disc_grads = jax.vmap(
+                    grad_stylegan_fn, in_axes=(None, 0, 0, None, None), out_axes=(0, 0)
+                )(state.disc_params, minibatch, predicted_images, dropout_rng, disc_model)
+                # ensure they are sharded correctly
+                disc_loss = with_sharding_constraint(disc_loss, batch_spec)
+                disc_loss_details = with_sharding_constraint(disc_loss_details, batch_spec)
+                disc_grads = with_sharding_constraint(disc_grads, grad_disc_params_spec)
+
                 # average across all devices
                 # Note: we could average per device only after gradient accumulation, right before params update
-                loss, grads, loss_details = jax.tree_util.tree_map(
-                    lambda x: jnp.mean(x, axis=0), (loss, grads, loss_details)
+                loss, grads, loss_details, disc_loss, disc_grads, disc_loss_details = jax.tree_util.tree_map(
+                    lambda x: jnp.mean(x, axis=0),
+                    (loss, grads, loss_details, disc_loss, disc_grads, disc_loss_details),
                 )
             else:
-                # "vmap trick" does not work in multi-hosts and requires too much hbm
-                (loss, loss_details), grads = grad_fn(state.params, minibatch, dropout_rng, model)
+                # "vmap trick" may not work in multi-hosts or require too much hbm
+                (loss, (loss_details, predicted_images)), grads = grad_fn(
+                    state.params, state.disc_params, minibatch, dropout_rng, model, disc_model
+                )
+                (disc_loss, disc_loss_details), disc_grads = grad_stylegan_fn(
+                    state.disc_params, minibatch, predicted_images, dropout_rng, disc_model
+                )
             # ensure grads are sharded
             grads = with_sharding_constraint(grads, params_spec)
-            # return loss and grads
-            return loss, grads, dropout_rng, loss_details
+            disc_grads = with_sharding_constraint(disc_grads, disc_params_spec)
+            # return loss, grads and metrics
+            loss_details = {**loss_details, **disc_loss_details}
+            return loss, grads, disc_grads, dropout_rng, loss_details
 
         if training_args.gradient_accumulation_steps == 1:
-            loss, grads, dropout_rng, loss_details = loss_and_grad(None, state.dropout_rng)
+            loss, grads, disc_grads, dropout_rng, loss_details = loss_and_grad(None, state.dropout_rng)
         else:
             # create initial state for cumul_minibatch_step loop
             init_minibatch_step = (
                 0.0,
                 with_sharding_constraint(jax.tree_util.tree_map(jnp.zeros_like, state.params), params_spec),
+                with_sharding_constraint(jax.tree_util.tree_map(jnp.zeros_like, state.disc_params), disc_params_spec),
                 state.dropout_rng,
                 {
                     "loss_l1": 0.0,
@@ -914,6 +1081,10 @@ def main():
                     "loss_q_latent": 0.0,
                     "loss_e_latent": 0.0,
                     "loss_lpips": 0.0,
+                    "loss_stylegan": 0.0,
+                    "disc_loss": 0.0,
+                    "disc_loss_stylegan": 0.0,
+                    "disc_loss_gradient_penalty": 0.0,
                 },
             )
 
@@ -922,37 +1093,42 @@ def main():
                 (
                     cumul_loss,
                     cumul_grads,
+                    cumul_disc_grads,
                     dropout_rng,
                     cumul_loss_details,
                 ) = cumul_loss_grad_dropout
-                loss, grads, dropout_rng, loss_details = loss_and_grad(grad_idx, dropout_rng)
-                cumul_loss, cumul_grads, cumul_loss_details = jax.tree_util.tree_map(
+                loss, grads, disc_grads, dropout_rng, loss_details = loss_and_grad(grad_idx, dropout_rng)
+                cumul_loss, cumul_grads, cumul_disc_grads, cumul_loss_details = jax.tree_util.tree_map(
                     jnp.add,
-                    (cumul_loss, cumul_grads, cumul_loss_details),
-                    (loss, grads, loss_details),
+                    (cumul_loss, cumul_grads, cumul_disc_grads, cumul_loss_details),
+                    (loss, grads, disc_grads, loss_details),
                 )
                 cumul_grads = with_sharding_constraint(cumul_grads, params_spec)
-                return cumul_loss, cumul_grads, dropout_rng, cumul_loss_details
+                cumul_disc_grads = with_sharding_constraint(cumul_disc_grads, disc_params_spec)
+                return cumul_loss, cumul_grads, cumul_disc_grads, dropout_rng, cumul_loss_details
 
             # loop over gradients
-            loss, grads, dropout_rng, loss_details = jax.lax.fori_loop(
+            loss, grads, disc_grads, dropout_rng, loss_details = jax.lax.fori_loop(
                 0,
                 training_args.gradient_accumulation_steps,
                 cumul_minibatch_step,
                 init_minibatch_step,
             )
             grads = with_sharding_constraint(grads, params_spec)
+            disc_grads = with_sharding_constraint(disc_grads, disc_params_spec)
             # sum -> mean
-            loss, grads, loss_details = jax.tree_util.tree_map(
+            loss, grads, disc_grads, loss_details = jax.tree_util.tree_map(
                 lambda x: x / training_args.gradient_accumulation_steps,
-                (loss, grads, loss_details),
+                (loss, grads, disc_grads, loss_details),
             )
 
         grads = with_sharding_constraint(grads, params_spec)
+        disc_grads = with_sharding_constraint(disc_grads, disc_params_spec)
 
         # update state
         state = state.apply_gradients(
             grads=grads,
+            disc_grads=disc_grads,
             dropout_rng=dropout_rng,
             train_time=train_time,
             train_samples=state.train_samples + training_args.batch_size_per_step,
@@ -961,6 +1137,7 @@ def main():
         metrics = {
             "loss": loss,
             "learning_rate": learning_rate_fn(state.step),
+            "disc_learning_rate": disc_learning_rate_fn(state.step),
             **loss_details,
         }
 
@@ -1020,11 +1197,33 @@ def main():
             _do_init=False,
         )
     )
+    eval_disc_model = (
+        disc_model
+        if model_args.dtype == "float32"
+        else StyleGANDiscriminator(
+            disc_model.config,
+            seed=training_args.seed_model,
+            dtype=jnp.float32,
+            _do_init=False,
+        )
+    )
 
     # Evaluation step
     def eval_step(state, batch):
         def compute_eval_loss(batch):
-            loss, loss_details = compute_loss(state.params, batch, dropout_rng=None, model_fn=eval_model, train=False)
+            loss, (loss_details, predicted_images) = compute_loss(
+                state.params,
+                state.disc_params,
+                batch,
+                dropout_rng=None,
+                model_fn=eval_model,
+                disc_model_fn=eval_disc_model,
+                train=False,
+            )
+            _, disc_loss_details = compute_stylegan_loss(
+                state.disc_params, batch, predicted_images, None, eval_disc_model, train=False
+            )
+            loss_details = {**loss_details, **disc_loss_details}
             return {
                 "loss": loss,
                 **loss_details,
@@ -1040,6 +1239,19 @@ def main():
             metrics = compute_eval_loss(batch)
 
         return metrics
+
+    # Inference step (to log samples)
+    def inference_step(state, batch):
+        def get_predictions(minibatch):
+            predicted_images, _ = eval_model(minibatch, params=state.params, dropout_rng=None, train=False)
+            return predicted_images
+
+        if training_args.use_vmap_trick:
+            preds = jax.vmap(get_predictions)(batch)
+        else:
+            preds = get_predictions(batch)
+
+        return preds
 
     # Create parallel version of the train and eval step
     p_train_step = pjit(
@@ -1057,6 +1269,7 @@ def main():
         in_axis_resources=(state_spec, batch_spec),
         out_axis_resources=None,
     )
+    p_inference_step = pjit(inference_step, in_axis_resources=(state_spec, batch_spec), out_axis_resources=batch_spec)
 
     # define metrics logger
     class MetricsLogger:
@@ -1137,8 +1350,11 @@ def main():
         if training_args.do_eval:
             start_eval_time = time.perf_counter()
             metrics = []
-            for batch in tqdm(
-                dataset.valid.as_numpy_iterator(),
+            # number of steps required to have enough samples to log
+            n_samples_step = training_args.log_n_samples / training_args.valid_batch_size_per_node
+            images, predictions = [], []
+            for i, batch in tqdm(
+                enumerate(dataset.valid.as_numpy_iterator()),
                 desc="Evaluating...",
                 position=2,
                 leave=False,
@@ -1168,12 +1384,35 @@ def main():
                 # accumulate losses async
                 metrics.append(p_eval_step(state, batch))
 
+                # add sample predictions
+                if i < n_samples_step:
+                    predictions.append(p_inference_step(state, batch))
+                    images.append(batch)
+
             # get the mean of the metrics
             metrics = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *metrics)
             metrics = jax.tree_util.tree_map(jnp.mean, metrics)
 
             # log metrics
             metrics_logger.log(metrics, prefix="valid")
+
+            # log images
+            images = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *images)
+            predictions = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *predictions)
+            # flatten images and preds
+            images, predictions = jax.tree_util.tree_map(
+                lambda x: x.reshape((-1,) + x.shape[-3:]), (images, predictions)
+            )
+            images = images[: training_args.log_n_samples]
+            predictions = predictions[: training_args.log_n_samples]
+            # convert to images
+            images = logits_to_image(images, dataset.format)
+            predictions = logits_to_image(predictions, dataset.format)
+            # log in wandb
+            if jax.process_index() == 0:
+                images = [wandb.Image(img) for img in images]
+                predictions = [wandb.Image(img) for img in predictions]
+                wandb.log({"samples/ground_truth": images, "samples/predictions": predictions})
 
             # Print metrics and update progress bar
             desc = f"Epoch... ({epoch + 1}/{num_epochs} | Valid Loss: {metrics['loss']})"
@@ -1187,21 +1426,23 @@ def main():
 
     def run_save_model(state, eval_metrics=None):
         if jax.process_index() == 0:
-
             start_save_time = time.perf_counter()
             output_dir = training_args.output_dir
+            disc_output_dir = Path(output_dir) / "disc"
 
             # save model
             params = jax.device_get(state.params)
-            model.save_pretrained(
-                output_dir,
-                params=params,
-            )
+            model.save_pretrained(output_dir, params=params)
+            disc_params = jax.device_get(state.disc_params)
+            disc_model.save_pretrained(disc_output_dir, params=disc_params)
 
             # save state
             opt_state = jax.device_get(state.opt_state)
             with (Path(output_dir) / "opt_state.msgpack").open("wb") as f:
                 f.write(to_bytes(opt_state))
+            disc_opt_state = jax.device_get(state.disc_opt_state)
+            with (Path(output_dir) / "disc_opt_state.msgpack").open("wb") as f:
+                f.write(to_bytes(disc_opt_state))
 
             # save to HF hub
             if training_args.push_to_hub:
@@ -1237,6 +1478,19 @@ def main():
                     artifact.add_file(f"{Path(training_args.output_dir) / filename}")
                 wandb.run.log_artifact(artifact)
 
+                # create discriminator model artifact
+                artifact = wandb.Artifact(
+                    name=f"disc-{wandb.run.id}",
+                    type="Discriminator",
+                    metadata=metadata,
+                )
+                for filename in [
+                    "disc/config.json",
+                    "disc/flax_model.msgpack",
+                ]:
+                    artifact.add_file(f"{Path(training_args.output_dir) / filename}")
+                wandb.run.log_artifact(artifact)
+
                 # create state artifact
                 artifact_state = wandb.Artifact(
                     name=f"state-{wandb.run.id}",
@@ -1244,6 +1498,7 @@ def main():
                     metadata=metadata,
                 )
                 artifact_state.add_file(f"{Path(training_args.output_dir) / 'opt_state.msgpack'}")
+                artifact_state.add_file(f"{Path(training_args.output_dir) / 'disc_opt_state.msgpack'}")
                 wandb.run.log_artifact(artifact_state)
             metrics_logger.log_time("save_model", time.perf_counter() - start_save_time)
 

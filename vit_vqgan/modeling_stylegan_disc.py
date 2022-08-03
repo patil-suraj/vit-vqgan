@@ -18,11 +18,13 @@ import jax
 import jax.nn as jnn
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
-from numpy import block
-from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel
+from flax.linen import partitioning as nn_partitioning
+from transformers.modeling_flax_utils import FlaxPreTrainedModel
 
 from .configuration_stylegan_disc import StyleGANDiscriminatorConfig
 from .utils import PretrainedFromWandbMixin
+
+remat = nn_partitioning.remat
 
 ActivationFunction = Callable[[jnp.ndarray], jnp.ndarray]
 
@@ -202,7 +204,7 @@ class DiscriminatorBlock(nn.Module):
         return (y + residual) / sqrt(2)
 
 
-def _get_num_features(base_features: int, image_size: Tuple[int, int], max_hidded_feature_size: int) -> List[int]:
+def _get_num_features(base_features: int, image_size: Tuple[int, int], max_hidden_feature_size: int) -> List[int]:
     """
     Gets number of features for the blocks. Each block includes a downsampling
     step by a factor of two and at the end, we want the resolution to be
@@ -221,7 +223,7 @@ def _get_num_features(base_features: int, image_size: Tuple[int, int], max_hidde
     num_blocks = int(log2(shortest_side)) - 1
     num_features = (base_features * (2**i) for i in range(num_blocks))
     # we want to bring it down to 4x4 at the end of the last block
-    return [min(n, max_hidded_feature_size) for n in num_features]
+    return [min(n, max_hidden_feature_size) for n in num_features]
 
 
 class StyleGANDiscriminatorModule(nn.Module):
@@ -266,7 +268,7 @@ class StyleGANDiscriminatorModule(nn.Module):
 
         size_t: Tuple[int, int] = (
             image_size
-            if isinstance(image_size, tuple)
+            if isinstance(image_size, (tuple, list))
             else (
                 image_size,
                 image_size,
@@ -283,9 +285,10 @@ class StyleGANDiscriminatorModule(nn.Module):
         self.conv_in = nn.Conv(base_features, kernel_size=(1, 1), padding="SAME", dtype=self.dtype)
 
         blocks = []
+        layer = remat(DiscriminatorBlock) if self.config.gradient_checkpointing else DiscriminatorBlock
         for _, (n_in, n_out) in enumerate(zip(self.num_features[1:], self.num_features)):
             blocks.append(
-                DiscriminatorBlock(
+                layer(
                     n_in,
                     n_out,
                     activation_function=self.activation_function,

@@ -122,11 +122,11 @@ class FeedForwardLayer(nn.Module):
             # suggestion from Katherine Crowson
             hidden_states = patch_1D_to_2D(hidden_states)
             hidden_states = nn.Conv(
-                self.embed_dim,
+                self.dim1,
                 kernel_size=(3, 3),
                 strides=(1, 1),
                 padding="SAME",
-                feature_group_count=self.embed_dim,
+                feature_group_count=self.dim1,
                 use_bias=self.config.use_bias,
                 dtype=self.dtype,
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
@@ -176,11 +176,11 @@ class GLU(nn.Module):
             # suggestion from Katherine Crowson
             hidden_states = patch_1D_to_2D(hidden_states)
             hidden_states = nn.Conv(
-                self.embed_dim,
+                self.dim1,
                 kernel_size=(3, 3),
                 strides=(1, 1),
                 padding="SAME",
-                feature_group_count=self.embed_dim,
+                feature_group_count=self.dim1,
                 use_bias=self.config.use_bias,
                 dtype=self.dtype,
                 kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
@@ -317,13 +317,15 @@ class Transformer(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        layer = remat(TransformerBlock) if self.config.gradient_checkpointing else TransformerBlock
+        layer = (
+            remat(TransformerBlock, static_argnums=(1,)) if self.config.gradient_checkpointing else TransformerBlock
+        )
 
         self.layers = [layer(self.config, name=str(i), dtype=self.dtype) for i in range(self.num_layers)]
 
     def __call__(self, hidden_states, deterministic: bool = True):
         for layer in self.layers:
-            hidden_states = layer(hidden_states, deterministic=deterministic)
+            hidden_states = layer(hidden_states, deterministic)
         return hidden_states
 
 
@@ -394,7 +396,6 @@ class VectorQuantizer(nn.Module):
     """
 
     config: ViTVQConfig
-    dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         embed_init = variance_scaling(1.0, "fan_in", "normal", out_axis=0)
@@ -402,7 +403,7 @@ class VectorQuantizer(nn.Module):
             "codebook_embedding",
             embed_init,
             (self.config.n_embed, self.config.codebook_embed_dim),
-            self.dtype,
+            jnp.float32,
         )
 
     def __call__(self, hidden_states):
@@ -464,7 +465,7 @@ class VitVQModule(nn.Module):
         self.encoder = VitEncoder(self.config, dtype=self.dtype)
         self.decoder = VitDecoder(self.config, dtype=self.dtype)
 
-        self.quantizer = VectorQuantizer(self.config, dtype=self.dtype)
+        self.quantizer = VectorQuantizer(self.config)
 
         self.factor_in = nn.Dense(
             self.config.codebook_embed_dim,

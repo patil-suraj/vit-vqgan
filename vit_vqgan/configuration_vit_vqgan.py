@@ -7,8 +7,8 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
     def __init__(
         self,
         hidden_size=768,
-        codebook_embed_dim=32,
-        n_embed=16384,
+        codebook_embed_dim=4,
+        n_embed=8192,
         # cost_e_latent is commitment_cost and should be set appropriately. It's often useful to try a couple
         # of values. It mostly depends on the scale of the reconstruction cost
         # (log p(x|z)). So if the reconstruction cost is 100x higher, the
@@ -18,6 +18,8 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         cost_q_latent=1.0,
         cost_e_latent=0.25,
         cost_lpips=0.1,
+        cost_stylegan=0.1,
+        cost_gradient_penalty=1.0,
         intermediate_size=768 * 4,
         num_encoder_layers=12,
         num_decoder_layers=12,
@@ -36,7 +38,7 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         initializer_range=0.02,
         use_bias=False,
         ln_positions="preln",  # preln, normformer
-        gradient_checkpointing=True,
+        gradient_checkpointing=False,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -46,6 +48,8 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         self.cost_q_latent = cost_q_latent
         self.cost_e_latent = cost_e_latent
         self.cost_lpips = cost_lpips
+        self.cost_stylegan = cost_stylegan
+        self.cost_gradient_penalty = cost_gradient_penalty
         self.hidden_size = hidden_size
         self.codebook_embed_dim = codebook_embed_dim
         self.n_embed = n_embed
