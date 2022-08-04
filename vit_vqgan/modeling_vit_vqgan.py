@@ -41,9 +41,7 @@ def to_patches(image, patch_size):
     num_patches = (height // patch_size) ** 2
     patch_height = patch_width = height // patch_size
 
-    patches = image.reshape(
-        batch, patch_height, patch_size, patch_width, patch_size, channels
-    )
+    patches = image.reshape(batch, patch_height, patch_size, patch_width, patch_size, channels)
     # (batch, patch_height, patch_width, patch_size, patch_size, channels)
     patches = patches.transpose(0, 1, 3, 2, 4, 5)
     # (batch, patch_height*patch_width, patch_size * patch_size * channels)
@@ -56,9 +54,7 @@ def to_image(patches, patch_size):
     patch_height = patch_width = int(num_patches**0.5)
     image_size = patch_height * patch_size
     patches = patches.reshape(batch, patch_height, patch_width, channels)
-    patches = patches.reshape(
-        batch, patch_height, patch_width, patch_size, patch_size, -1
-    )
+    patches = patches.reshape(batch, patch_height, patch_width, patch_size, patch_size, -1)
     patches = patches.transpose(0, 1, 3, 2, 4, 5)
     patches = patches.reshape(batch, image_size, image_size, -1)
     return patches
@@ -116,9 +112,9 @@ class FeedForwardLayer(nn.Module):
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
 
-        hidden_states = nn.LayerNorm(
-            epsilon=self.config.layer_norm_eps, dtype=self.dtype, name="layernorm_0"
-        )(hidden_states)
+        hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype, name="layernorm_0")(
+            hidden_states
+        )
         hidden_states = Dense(features=self.dim1, name="fc1")(hidden_states)
         hidden_states = ACT2FN[self.activation](hidden_states)
 
@@ -139,17 +135,13 @@ class FeedForwardLayer(nn.Module):
             hidden_states = patch_2D_to_1D(hidden_states)
 
         if self.config.ln_positions == "normformer":
-            hidden_states = nn.LayerNorm(
-                epsilon=self.config.layer_norm_eps, dtype=self.dtype, name="layernorm_1"
-            )(hidden_states)
+            hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype, name="layernorm_1")(
+                hidden_states
+            )
 
-        hidden_states = nn.Dropout(rate=self.config.dropout)(
-            hidden_states, deterministic=deterministic
-        )
+        hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
         hidden_states = Dense(features=self.dim2, name="fc2")(hidden_states)
-        hidden_states = nn.Dropout(rate=self.config.dropout)(
-            hidden_states, deterministic=deterministic
-        )
+        hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
         return hidden_states
 
 
@@ -169,9 +161,9 @@ class GLU(nn.Module):
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
 
-        hidden_states = nn.LayerNorm(
-            epsilon=self.config.layer_norm_eps, dtype=self.dtype, name="layernorm_0"
-        )(hidden_states)
+        hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype, name="layernorm_0")(
+            hidden_states
+        )
 
         hidden_gelu = Dense(features=self.dim1, name="fc1")(hidden_states)
         hidden_gelu = ACT2FN[self.activation](hidden_gelu)
@@ -197,17 +189,13 @@ class GLU(nn.Module):
             hidden_states = patch_2D_to_1D(hidden_states)
 
         if self.config.ln_positions == "normformer":
-            hidden_states = nn.LayerNorm(
-                epsilon=self.config.layer_norm_eps, dtype=self.dtype, name="layernorm_1"
-            )(hidden_states)
+            hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype, name="layernorm_1")(
+                hidden_states
+            )
 
-        hidden_states = nn.Dropout(rate=self.config.dropout)(
-            hidden_states, deterministic=deterministic
-        )
+        hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
         hidden_states = Dense(features=self.dim2, name="fc_out")(hidden_states)
-        hidden_states = nn.Dropout(rate=self.config.dropout)(
-            hidden_states, deterministic=deterministic
-        )
+        hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
         return hidden_states
 
 
@@ -252,9 +240,7 @@ class Attention(nn.Module):
             )
 
     def _split_heads(self, hidden_states):
-        return hidden_states.reshape(
-            hidden_states.shape[:2] + (self.num_heads, self.head_dim)
-        )
+        return hidden_states.reshape(hidden_states.shape[:2] + (self.num_heads, self.head_dim))
 
     def _merge_heads(self, hidden_states):
         return hidden_states.reshape(hidden_states.shape[:2] + (self.embed_dim,))
@@ -302,17 +288,13 @@ class TransformerBlock(nn.Module):
     def __call__(self, hidden_states, deterministic: bool = True):
         residual = hidden_states
 
-        hidden_states = nn.LayerNorm(
-            epsilon=self.config.layer_norm_eps, dtype=self.dtype
-        )(hidden_states)
+        hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(hidden_states)
         hidden_states = Attention(self.config, dtype=self.dtype)(
             hidden_states=hidden_states, deterministic=deterministic
         )
 
         if self.config.ln_positions == "normformer":
-            hidden_states = nn.LayerNorm(
-                epsilon=self.config.layer_norm_eps, dtype=self.dtype
-            )(hidden_states)
+            hidden_states = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)(hidden_states)
         hidden_states = residual + hidden_states
 
         FFN = GLU if self.config.use_glu else FeedForwardLayer
@@ -355,14 +337,10 @@ class Transformer(nn.Module):
                 split_rngs={"params": True, "dropout": True},
                 in_axes=(nn.broadcast,),
                 length=self.num_layers,
-            )(self.config, dtype=self.dtype, name="scanned")(
-                hidden_states, deterministic
-            )
+            )(self.config, dtype=self.dtype, name="scanned")(hidden_states, deterministic)
         else:
             for i in range(self.num_layers):
-                hidden_states = layer(self.config, name=str(i), dtype=self.dtype)(
-                    hidden_states, deterministic
-                )
+                hidden_states = layer(self.config, name=str(i), dtype=self.dtype)(hidden_states, deterministic)
         return hidden_states
 
 
@@ -375,9 +353,7 @@ class VitEncoder(nn.Module):
         if self.config.use_conv_patches:
             hidden_states = ConvPatches(self.config, dtype=self.dtype)(pixel_values)
         else:
-            hidden_states = partial(to_patches, patch_size=self.config.patch_size)(
-                pixel_values
-            )
+            hidden_states = partial(to_patches, patch_size=self.config.patch_size)(pixel_values)
             hidden_states = nn.Dense(
                 self.config.hidden_size,
                 use_bias=self.config.use_bias,
@@ -395,12 +371,10 @@ class VitEncoder(nn.Module):
         )
         hidden_states += position_embeddings
 
-        hidden_states = nn.Dropout(rate=self.config.dropout)(
+        hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
+        hidden_states = Transformer(self.config.num_encoder_layers, self.config, dtype=self.dtype)(
             hidden_states, deterministic=deterministic
         )
-        hidden_states = Transformer(
-            self.config.num_encoder_layers, self.config, dtype=self.dtype
-        )(hidden_states, deterministic=deterministic)
         return hidden_states
 
 
@@ -418,9 +392,9 @@ class VitDecoder(nn.Module):
             (1, num_patches, self.config.hidden_size),
         )
         hidden_states += position_embeddings
-        hidden_states = Transformer(
-            self.config.num_decoder_layers, self.config, dtype=self.dtype
-        )(hidden_states, deterministic=deterministic)
+        hidden_states = Transformer(self.config.num_decoder_layers, self.config, dtype=self.dtype)(
+            hidden_states, deterministic=deterministic
+        )
         return hidden_states
 
 
@@ -458,9 +432,7 @@ class VectorQuantizer(nn.Module):
             2. flatten input to (B*H*W,C)
         """
         #  flatten
-        hidden_states_flattened = hidden_states.reshape(
-            (-1, self.config.codebook_embed_dim)
-        )
+        hidden_states_flattened = hidden_states.reshape((-1, self.config.codebook_embed_dim))
 
         # normalize `z` here `hidden_states` and codebook latent variable `e` (here `embedding`)
         hidden_states_flattened = l2_normalize(hidden_states_flattened, axis=1)
@@ -480,12 +452,8 @@ class VectorQuantizer(nn.Module):
         z_q = self.get_codebook_entry(min_encoding_indices)
 
         hidden_states_normed = l2_normalize(hidden_states, axis=-1)
-        e_latent_loss = jnp.mean(
-            jnp.square(jax.lax.stop_gradient(z_q) - hidden_states_normed)
-        )
-        q_latent_loss = jnp.mean(
-            jnp.square(z_q - jax.lax.stop_gradient(hidden_states_normed))
-        )
+        e_latent_loss = jnp.mean(jnp.square(jax.lax.stop_gradient(z_q) - hidden_states_normed))
+        q_latent_loss = jnp.mean(jnp.square(z_q - jax.lax.stop_gradient(hidden_states_normed)))
 
         # Straight Through Estimator
         z_q = hidden_states + jax.lax.stop_gradient(z_q - hidden_states)
@@ -527,9 +495,7 @@ class VitVQModule(nn.Module):
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
         )
 
-        self.encoder_ln = nn.LayerNorm(
-            epsilon=self.config.layer_norm_eps, dtype=self.dtype, use_scale=False
-        )
+        self.encoder_ln = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype, use_scale=False)
 
         if self.config.use_conv_patches:
             self.to_image = nn.ConvTranspose(
@@ -573,9 +539,7 @@ class VitVQModule(nn.Module):
         # 5. Reconstruct the image from the patches
         if self.config.use_conv_patches:
             batch, _, channels = hidden_states.shape
-            hidden_states = hidden_states.reshape(
-                batch, self.latent_size, self.latent_size, channels
-            )
+            hidden_states = hidden_states.reshape(batch, self.latent_size, self.latent_size, channels)
             pixel_values = self.to_image(hidden_states)
         else:
             patches = self.to_patches(hidden_states)
@@ -640,9 +604,7 @@ class ViTVQGANPreTrainedModel(FlaxPreTrainedModel):
     def num_params(self, params=None):
         if params is None:
             params = self.params
-        num_params = jax.tree_util.tree_map(
-            lambda param: param.size, flatten_dict(unfreeze(params))
-        ).values()
+        num_params = jax.tree_util.tree_map(lambda param: param.size, flatten_dict(unfreeze(params))).values()
         return sum(list(num_params))
 
     def unscan(self, params):
