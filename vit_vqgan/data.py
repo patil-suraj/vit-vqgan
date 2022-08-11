@@ -121,7 +121,7 @@ class Dataset:
                 # non deterministic read (faster)
                 if augment:
                     ignore_order = tf.data.Options()
-                    ignore_order.experimental_deterministic = False
+                    ignore_order.deterministic = False
                     ds = ds.with_options(ignore_order)
 
                 if self.multi_hosts and dataset == "train":
