@@ -100,11 +100,29 @@ class Dataset:
         ):
             if folder is not None:
                 # load files
-                files = [f"{Path(f)}" for f in Path(folder).glob("*.tfrecord")]
+                if "gs://" in folder:
+                    if folder[-1] != "/":
+                        folder += "/"
+                    files = tf.io.gfile.glob(f"{folder}*.tfrecord")
+                else:
+                    files = [f"{Path(f)}" for f in Path(folder).glob("*.tfrecord")]
                 assert len(files) > 0, f"No files found at folder: {folder}"
 
+                # shuffle files
+                if augment:
+                    random.shuffle(files)
+
                 # load dataset
-                ds = tf.data.TFRecordDataset(files)
+                ds = tf.data.TFRecordDataset(
+                    files,
+                    num_parallel_reads=tf.data.experimental.AUTOTUNE if augment else None,
+                )
+
+                # non deterministic read (faster)
+                if augment:
+                    ignore_order = tf.data.Options()
+                    ignore_order.deterministic = False
+                    ds = ds.with_options(ignore_order)
 
                 if self.multi_hosts and dataset == "train":
                     # repeat indefinitely
