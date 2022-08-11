@@ -101,7 +101,9 @@ class Dataset:
             if folder is not None:
                 # load files
                 if "gs://" in folder:
-                    files = tfio.gfile.list_files(f"{folder}/*.tfrecord")
+                    if folder[-1] != "/":
+                        folder += "/"
+                    files = tf.io.gfile.glob(f"{folder}*.tfrecord")
                 else:
                     files = [f"{Path(f)}" for f in Path(folder).glob("*.tfrecord")]
                 assert len(files) > 0, f"No files found at folder: {folder}"
