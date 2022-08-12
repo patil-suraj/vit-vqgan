@@ -366,7 +366,7 @@ class VitEncoder(nn.Module):
         num_patches = (self.config.image_size // self.config.patch_size) ** 2
         position_embeddings = self.param(
             "pos_embedding",
-            jax.nn.initializers.normal(self.config.initializer_range),
+            jax.nn.initializers.normal(self.config.initializer_range, dtype=jnp.float32),
             (1, num_patches, self.config.hidden_size),
         )
         hidden_states += position_embeddings
@@ -388,7 +388,7 @@ class VitDecoder(nn.Module):
         num_patches = (self.config.image_size // self.config.patch_size) ** 2
         position_embeddings = self.param(
             "pos_embedding",
-            jax.nn.initializers.normal(self.config.initializer_range),
+            jax.nn.initializers.normal(self.config.initializer_range, dtype=jnp.float32),
             (1, num_patches, self.config.hidden_size),
         )
         hidden_states += position_embeddings
