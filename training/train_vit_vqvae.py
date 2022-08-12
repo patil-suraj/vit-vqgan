@@ -36,6 +36,7 @@ from transformers.utils import get_full_repo_name
 from vit_vqgan import (StyleGANDiscriminator, StyleGANDiscriminatorConfig,
                        ViTVQConfig, ViTVQModel)
 from vit_vqgan.data import Dataset, logits_to_image
+from vit_vqgan.partitions import set_partitions
 
 logger = logging.getLogger(__name__)
 
@@ -597,11 +598,9 @@ def main():
     model_metadata = model_args.get_metadata()
 
     # get PartitionSpec and shape for model params
-    if training_args.mp_devices > 1:
-        raise NotImplementedError("Model Parallelism not implemented yet")
     params_shape = freeze(model.params_shape_tree)
     disc_params_shape = freeze(disc_model.params_shape_tree)
-    params_spec = jax.tree_util.tree_map(lambda _: PartitionSpec(None), params_shape)
+    params_spec = set_partitions(unfreeze(params_shape), model.config.use_scan)
     disc_params_spec = jax.tree_util.tree_map(lambda _: PartitionSpec(None), disc_params_shape)
     lpips_spec = None
 
