@@ -96,7 +96,7 @@ class ConvDownsample2D(nn.Module):
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(),
         )
-        self.resample_kernel_ = jnp.array(resample_kernel) * self.gain / resample_kernel.sum()
+        self.resample_kernel_ = (jnp.array(resample_kernel) * self.gain / resample_kernel.sum()).astype(jnp.float32)
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         # pylint: disable=invalid-name
