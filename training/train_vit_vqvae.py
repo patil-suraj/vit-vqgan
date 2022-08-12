@@ -110,7 +110,7 @@ class TrainingArguments:
         metadata={"help": "Whether to quantize optimizer (only supported with Distributed Shampoo)."},
     )
     shard_shampoo_across: str = field(
-        default="dp",
+        default="2d",
         metadata={"help": "Whether to shard the optimizer across data devices (dp), model devices (mp) or both (2d)."},
     )
     num_train_epochs: int = field(default=3, metadata={"help": "Total number of training epochs to perform."})
@@ -683,6 +683,15 @@ def main():
             PartitionSpec(None, training_args.shard_shampoo_across, None)
             if training_args.shard_shampoo_across != "2d"
             else PartitionSpec(None, "dp", "mp")
+            if training_args.dp_devices > training_args.mp_devices
+            else PartitionSpec(None, "mp", "dp")
+        )
+        preconditioner_partition_spec = (
+            PartitionSpec(training_args.shard_shampoo_across, None, None)
+            if training_args.shard_shampoo_across != "2d"
+            else PartitionSpec("dp", None, "mp")
+            if training_args.dp_devices > training_args.mp_devices
+            else PartitionSpec("mp", None, "dp")
         )
         _opt = partial(
             distributed_shampoo,
@@ -700,13 +709,7 @@ def main():
             nesterov=training_args.nesterov,
             exponent_override=0,
             statistics_partition_spec=statistics_partition_spec,
-            preconditioner_partition_spec=PartitionSpec(training_args.shard_shampoo_across, None, None)
-            if training_args.shard_shampoo_across != "2d"
-            else PartitionSpec(
-                "mp" if training_args.mp_devices > training_args.dp_devices else "dp",
-                None,
-                None,
-            ),
+            preconditioner_partition_spec=preconditioner_partition_spec,
             num_devices_for_pjit=training_args.dp_devices,
             shard_optimizer_states=True,
             inverse_failure_threshold=0.1,
@@ -789,9 +792,19 @@ def main():
             )
         else:
             raise NotImplementedError
-        return opt_state_spec, opt_state_shape, disc_opt_state_spec, disc_opt_state_shape
+        return (
+            opt_state_spec,
+            opt_state_shape,
+            disc_opt_state_spec,
+            disc_opt_state_shape,
+        )
 
-    opt_state_spec, opt_state_shape, disc_opt_state_spec, disc_opt_state_shape = get_opt_state_spec_and_shape()
+    (
+        opt_state_spec,
+        opt_state_shape,
+        disc_opt_state_spec,
+        disc_opt_state_shape,
+    ) = get_opt_state_spec_and_shape()
 
     # create a mesh
     mesh_shape = (training_args.dp_devices, training_args.mp_devices)
@@ -1029,7 +1042,14 @@ def main():
                 # "vmap trick", calculate loss and grads independently per dp_device
                 (loss, (loss_details, predicted_images)), grads = jax.vmap(
                     grad_fn, in_axes=(None, None, 0, None, None, None), out_axes=(0, 0)
-                )(state.params, state.disc_params, minibatch, dropout_rng, model, disc_model)
+                )(
+                    state.params,
+                    state.disc_params,
+                    minibatch,
+                    dropout_rng,
+                    model,
+                    disc_model,
+                )
                 # ensure they are sharded correctly
                 loss = with_sharding_constraint(loss, batch_spec)
                 loss_details = with_sharding_constraint(loss_details, batch_spec)
@@ -1039,7 +1059,13 @@ def main():
                 # discriminator grads
                 (disc_loss, disc_loss_details), disc_grads = jax.vmap(
                     grad_stylegan_fn, in_axes=(None, 0, 0, None, None), out_axes=(0, 0)
-                )(state.disc_params, minibatch, predicted_images, dropout_rng, disc_model)
+                )(
+                    state.disc_params,
+                    minibatch,
+                    predicted_images,
+                    dropout_rng,
+                    disc_model,
+                )
                 # ensure they are sharded correctly
                 disc_loss = with_sharding_constraint(disc_loss, batch_spec)
                 disc_loss_details = with_sharding_constraint(disc_loss_details, batch_spec)
@@ -1047,17 +1073,33 @@ def main():
 
                 # average across all devices
                 # Note: we could average per device only after gradient accumulation, right before params update
-                loss, grads, loss_details, disc_loss, disc_grads, disc_loss_details = jax.tree_util.tree_map(
+                (loss, grads, loss_details, disc_loss, disc_grads, disc_loss_details,) = jax.tree_util.tree_map(
                     lambda x: jnp.mean(x, axis=0),
-                    (loss, grads, loss_details, disc_loss, disc_grads, disc_loss_details),
+                    (
+                        loss,
+                        grads,
+                        loss_details,
+                        disc_loss,
+                        disc_grads,
+                        disc_loss_details,
+                    ),
                 )
             else:
                 # "vmap trick" may not work in multi-hosts or require too much hbm
                 (loss, (loss_details, predicted_images)), grads = grad_fn(
-                    state.params, state.disc_params, minibatch, dropout_rng, model, disc_model
+                    state.params,
+                    state.disc_params,
+                    minibatch,
+                    dropout_rng,
+                    model,
+                    disc_model,
                 )
                 (disc_loss, disc_loss_details), disc_grads = grad_stylegan_fn(
-                    state.disc_params, minibatch, predicted_images, dropout_rng, disc_model
+                    state.disc_params,
+                    minibatch,
+                    predicted_images,
+                    dropout_rng,
+                    disc_model,
                 )
             # ensure grads are sharded
             grads = with_sharding_constraint(grads, params_spec)
@@ -1073,7 +1115,10 @@ def main():
             init_minibatch_step = (
                 0.0,
                 with_sharding_constraint(jax.tree_util.tree_map(jnp.zeros_like, state.params), params_spec),
-                with_sharding_constraint(jax.tree_util.tree_map(jnp.zeros_like, state.disc_params), disc_params_spec),
+                with_sharding_constraint(
+                    jax.tree_util.tree_map(jnp.zeros_like, state.disc_params),
+                    disc_params_spec,
+                ),
                 state.dropout_rng,
                 {
                     "loss_l1": 0.0,
@@ -1098,14 +1143,20 @@ def main():
                     cumul_loss_details,
                 ) = cumul_loss_grad_dropout
                 loss, grads, disc_grads, dropout_rng, loss_details = loss_and_grad(grad_idx, dropout_rng)
-                cumul_loss, cumul_grads, cumul_disc_grads, cumul_loss_details = jax.tree_util.tree_map(
+                (cumul_loss, cumul_grads, cumul_disc_grads, cumul_loss_details,) = jax.tree_util.tree_map(
                     jnp.add,
                     (cumul_loss, cumul_grads, cumul_disc_grads, cumul_loss_details),
                     (loss, grads, disc_grads, loss_details),
                 )
                 cumul_grads = with_sharding_constraint(cumul_grads, params_spec)
                 cumul_disc_grads = with_sharding_constraint(cumul_disc_grads, disc_params_spec)
-                return cumul_loss, cumul_grads, cumul_disc_grads, dropout_rng, cumul_loss_details
+                return (
+                    cumul_loss,
+                    cumul_grads,
+                    cumul_disc_grads,
+                    dropout_rng,
+                    cumul_loss_details,
+                )
 
             # loop over gradients
             loss, grads, disc_grads, dropout_rng, loss_details = jax.lax.fori_loop(
@@ -1221,7 +1272,12 @@ def main():
                 train=False,
             )
             _, disc_loss_details = compute_stylegan_loss(
-                state.disc_params, batch, predicted_images, None, eval_disc_model, train=False
+                state.disc_params,
+                batch,
+                predicted_images,
+                None,
+                eval_disc_model,
+                train=False,
             )
             loss_details = {**loss_details, **disc_loss_details}
             return {
@@ -1269,7 +1325,11 @@ def main():
         in_axis_resources=(state_spec, batch_spec),
         out_axis_resources=None,
     )
-    p_inference_step = pjit(inference_step, in_axis_resources=(state_spec, batch_spec), out_axis_resources=batch_spec)
+    p_inference_step = pjit(
+        inference_step,
+        in_axis_resources=(state_spec, batch_spec),
+        out_axis_resources=batch_spec,
+    )
 
     # define metrics logger
     class MetricsLogger:
