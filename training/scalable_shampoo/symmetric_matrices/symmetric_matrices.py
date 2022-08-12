@@ -168,7 +168,11 @@ def materialize_matrix(symmetric_matrix):
     for k, block_row in enumerate(block_rows[1:]):
         for i in range(k + 1):
             off_diags[i].append(
-                jnp.swapaxes(a=block_row[Ellipsis, i * block_size : (i + 1) * block_size], axis1=-1, axis2=-2)
+                jnp.swapaxes(
+                    a=block_row[Ellipsis, i * block_size : (i + 1) * block_size],
+                    axis1=-1,
+                    axis2=-2,
+                )
             )
 
     return jnp.block([row + row_t for row, row_t in zip(blocks[:-1], off_diags)] + [blocks[-1]])
@@ -193,7 +197,10 @@ def materialize_matrix_from_concat(
     block_size = block_rows_concat.shape[-2]
 
     block_rows = [
-        block_rows_concat[Ellipsis, (k * (k + 1)) // 2 * block_size : (((k + 1) * (k + 2)) // 2 + 1) * block_size]
+        block_rows_concat[
+            Ellipsis,
+            (k * (k + 1)) // 2 * block_size : (((k + 1) * (k + 2)) // 2 + 1) * block_size,
+        ]
         for k in range(num_blocks)
     ]
 
@@ -296,7 +303,11 @@ def slice_symmetric_matrix(
         raise ValueError(f"block size does not evenly divide rows. num_rows={num_rows}, block_size={block_size}")
     return SlicedSymmetricMatrix(
         block_rows=[
-            mat[Ellipsis, i * block_size : (i + 1) * block_size, 0 : (i + 1) * block_size]
+            mat[
+                Ellipsis,
+                i * block_size : (i + 1) * block_size,
+                0 : (i + 1) * block_size,
+            ]
             for i in range(num_rows // block_size)
         ]
     )

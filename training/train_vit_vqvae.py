@@ -110,7 +110,7 @@ class TrainingArguments:
         metadata={"help": "Whether to quantize optimizer (only supported with Distributed Shampoo)."},
     )
     shard_shampoo_across: str = field(
-        default="dp",
+        default="2d",
         metadata={"help": "Whether to shard the optimizer across data devices (dp), model devices (mp) or both (2d)."},
     )
     num_train_epochs: int = field(default=3, metadata={"help": "Total number of training epochs to perform."})
@@ -706,6 +706,15 @@ def main():
             PartitionSpec(None, training_args.shard_shampoo_across, None)
             if training_args.shard_shampoo_across != "2d"
             else PartitionSpec(None, "dp", "mp")
+            if training_args.dp_devices > training_args.mp_devices
+            else PartitionSpec(None, "mp", "dp")
+        )
+        preconditioner_partition_spec = (
+            PartitionSpec(training_args.shard_shampoo_across, None, None)
+            if training_args.shard_shampoo_across != "2d"
+            else PartitionSpec("dp", None, "mp")
+            if training_args.dp_devices > training_args.mp_devices
+            else PartitionSpec("mp", None, "dp")
         )
         _opt = partial(
             distributed_shampoo,
@@ -723,13 +732,7 @@ def main():
             nesterov=training_args.nesterov,
             exponent_override=0,
             statistics_partition_spec=statistics_partition_spec,
-            preconditioner_partition_spec=PartitionSpec(training_args.shard_shampoo_across, None, None)
-            if training_args.shard_shampoo_across != "2d"
-            else PartitionSpec(
-                "mp" if training_args.mp_devices > training_args.dp_devices else "dp",
-                None,
-                None,
-            ),
+            preconditioner_partition_spec=preconditioner_partition_spec,
             num_devices_for_pjit=training_args.dp_devices,
             shard_optimizer_states=True,
             inverse_failure_threshold=0.1,
