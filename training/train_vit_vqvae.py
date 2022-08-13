@@ -597,12 +597,20 @@ def main():
     # get model metadata
     model_metadata = model_args.get_metadata()
 
+    # define lpips
+    lpips_fn = LPIPS()
+
+    def init_lpips(rng):
+        x = jax.random.normal(rng, shape=(1, data_args.image_size, data_args.image_size, 3))
+        return lpips_fn.init(rng, x, x)
+
     # get PartitionSpec and shape for model params
     params_shape = freeze(model.params_shape_tree)
     disc_params_shape = freeze(disc_model.params_shape_tree)
+    lpips_shape = jax.eval_shape(init_lpips, jax.random.PRNGKey(0))
     params_spec = set_partitions(unfreeze(params_shape), model.config.use_scan)
-    disc_params_spec = jax.tree_util.tree_map(lambda _: PartitionSpec(None), disc_params_shape)
-    lpips_spec = None
+    disc_params_spec = set_partitions(unfreeze(disc_params_shape), False)
+    lpips_spec = set_partitions(unfreeze(lpips_shape), False)
 
     # Initialize our training
     rng = jax.random.PRNGKey(training_args.seed_model)
@@ -937,13 +945,6 @@ def main():
         lpips_params=lpips_spec,
     )
 
-    # define lpips
-    lpips_fn = LPIPS()
-
-    def init_lpips(rng, image_size):
-        x = jax.random.normal(rng, shape=(1, image_size, image_size, 3))
-        return lpips_fn.init(rng, x, x)
-
     # init params if not available yet
     def maybe_init_params(params, m):
         if params is not None:
@@ -966,7 +967,7 @@ def main():
         if not model_args.restore_state:
 
             def init_state(params, disc_params):
-                lpips_params = init_lpips(rng, data_args.image_size)
+                lpips_params = init_lpips(rng)
                 return TrainState.create(
                     params=maybe_init_params(params, model),
                     disc_params=maybe_init_params(disc_params, disc_model),
@@ -992,7 +993,7 @@ def main():
             disc_opt_state = from_bytes(disc_opt_state_shape, disc_opt_state)
 
             def restore_state(params, disc_params, opt_state, disc_opt_state):
-                lpips_params = init_lpips(rng, data_args.image_size)
+                lpips_params = init_lpips(rng)
                 return TrainState(
                     params=params,
                     disc_params=disc_params,

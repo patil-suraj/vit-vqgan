@@ -63,6 +63,13 @@ def _get_partition_rules():
         (("factor_out", "kernel"), P(None, "mp")),
         (("quantizer", "codebook_embedding"), P("mp", None)),
         (("to_image", "kernel"), P(None, None, "mp", None)),
+        # discriminator/lpips
+        (("conv.*", "kernel"), P(None, None, None, "mp")),
+        # discriminator
+        (("classifier", "kernel"), None),
+        (("dense", "kernel"), P("mp", None)),
+        # lpips
+        (("layer", "kernel"), P(None, None, "mp", None)),
     ]
 
 
