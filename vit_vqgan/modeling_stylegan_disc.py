@@ -152,10 +152,10 @@ def minibatch_stddev_layer(
     group_size = min(group_size, N) if group_size is not None else N
     C_ = C // num_new_features
 
-    y = jnp.reshape(x, (group_size, -1, H, W, num_new_features, C_))
+    y = jnp.reshape(x, (-1, group_size, H, W, num_new_features, C_))
 
-    y_centered = y - jnp.mean(y, axis=0, keepdims=True)
-    y_std = jnp.sqrt(jnp.mean(y_centered * y_centered, axis=0) + 1e-8)
+    y_centered = y - jnp.mean(y, axis=1, keepdims=True)
+    y_std = jnp.sqrt(jnp.mean(y_centered * y_centered, axis=1) + 1e-8)
 
     y_std = jnp.mean(y_std, axis=(1, 2, 4))
     y_std = y_std.reshape((-1, 1, 1, num_new_features))
