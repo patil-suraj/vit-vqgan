@@ -28,5 +28,5 @@
   "use_bias": false,
   "use_conv_patches": true,
   "use_glu": true,
-  "use_scan": true
+  "use_scan": false
 }
