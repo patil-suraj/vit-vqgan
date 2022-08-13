@@ -6,7 +6,7 @@
   "cost_l2": 1.0,
   "cost_lpips": 0.05,
   "cost_q_latent": 1.0,
-  "cost_stylegan": 0.005,
+  "cost_stylegan": 0.0,
   "cost_gradient_penalty": 1e8,
   "dropout": 0.0,
   "gradient_checkpointing": false,
