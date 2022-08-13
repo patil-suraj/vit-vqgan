@@ -203,7 +203,7 @@ class TrainingArguments:
     )
 
     use_vmap_trick: bool = field(
-        default=True,
+        default=False,
         metadata={"help": "Optimization trick that should lead to faster training."},
     )
 
