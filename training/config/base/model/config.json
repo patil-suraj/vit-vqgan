@@ -14,7 +14,7 @@
   "hidden_size": 768,
   "image_size": 256,
   "initializer_range": 0.02,
-  "intermediate_size": 2048,
+  "intermediate_size": 256,
   "layer_norm_eps": 1e-5,
   "ln_positions": "normformer",
   "mid_ffn_conv": true,
