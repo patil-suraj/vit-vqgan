@@ -40,7 +40,7 @@ from vit_vqgan.partitions import set_partitions
 
 logger = logging.getLogger(__name__)
 
-#cc.initialize_cache("jax_cache")
+# cc.initialize_cache("jax_cache")
 
 
 @dataclass
@@ -1105,7 +1105,7 @@ def main():
             # minibatch at grad_idx for gradient accumulation (None otherwise)
             minibatch = get_minibatch(batch, grad_idx) if grad_idx is not None else batch
             # ensure it is sharded properly
-            minibatch = with_sharding_constraint(minibatch, batch_spec)
+            # minibatch = with_sharding_constraint(minibatch, batch_spec)
             # only 1 single rng per grad step, let us handle larger batch size (not sure why)
             dropout_rng, _ = jax.random.split(dropout_rng)
 
@@ -1173,8 +1173,8 @@ def main():
                     disc_model,
                 )
             # ensure grads are sharded
-            grads = with_sharding_constraint(grads, params_spec)
-            disc_grads = with_sharding_constraint(disc_grads, disc_params_spec)
+            # grads = with_sharding_constraint(grads, params_spec)
+            # disc_grads = with_sharding_constraint(disc_grads, disc_params_spec)
             # return loss, grads and metrics
             loss_details = {**loss_details, **disc_loss_details}
             return loss, grads, disc_grads, dropout_rng, loss_details
@@ -1244,8 +1244,8 @@ def main():
                 (loss, grads, disc_grads, loss_details),
             )
 
-        grads = with_sharding_constraint(grads, params_spec)
-        disc_grads = with_sharding_constraint(disc_grads, disc_params_spec)
+        # grads = with_sharding_constraint(grads, params_spec)
+        # disc_grads = with_sharding_constraint(disc_grads, disc_params_spec)
 
         # update state
         state = state.apply_gradients(
@@ -1679,6 +1679,14 @@ def main():
                     )
 
                     # train step
+                    from pprint import pprint
+
+                    val = jax.tree_util.tree_map(lambda x: x.shape, batch)
+                    print("\n\n\nBATCH")
+                    pprint(val)
+                    val = jax.tree_util.tree_map(lambda x: x.shape, state.params)
+                    print("\n\n\nPARAMS")
+                    pprint(val)
                     state, train_metrics = p_train_step(state, batch, train_time)
                     local_state["step"] += 1
                     local_state["train_time"] = train_time
