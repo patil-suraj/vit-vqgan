@@ -179,7 +179,7 @@ class DiscriminatorBlock(nn.Module):
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(),
         )
-        self.downsampl1 = ConvDownsample2D(
+        self.downsample1 = ConvDownsample2D(
             self.out_features,
             kernel_shape=3,
             resample_kernel=self.resample_kernel,
@@ -197,7 +197,7 @@ class DiscriminatorBlock(nn.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         y = self.conv_in(x)
         y = self.activation_function(y)
-        y = self.downsampl1(y)
+        y = self.downsample1(y)
         y = self.activation_function(y)
 
         residual = self.downsample2(x)
