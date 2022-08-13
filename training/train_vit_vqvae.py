@@ -21,7 +21,7 @@ import wandb
 from flax import core, struct
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.serialization import from_bytes, to_bytes
-from flax.traverse_util import flatten_dict
+from flax.traverse_util import flatten_dict, unflatten_dict
 from huggingface_hub import Repository
 from jax.experimental import PartitionSpec, maps
 from jax.experimental.compilation_cache import compilation_cache as cc
@@ -36,6 +36,7 @@ from transformers.utils import get_full_repo_name
 from vit_vqgan import (StyleGANDiscriminator, StyleGANDiscriminatorConfig,
                        ViTVQConfig, ViTVQModel)
 from vit_vqgan.data import Dataset, logits_to_image
+from vit_vqgan.partitions import set_partitions
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +443,29 @@ def flat_args(model_args, data_args, training_args):
     return args
 
 
+def split_scanned_params(data):
+    """Split params between scanned and non-scanned"""
+    flat = flatten_dict(unfreeze(data))
+    split = {"standard": {}, "scanned": {}}
+    for k, v in flat.items():
+        if "scanned" in k:
+            split["scanned"][k] = v
+        else:
+            split["standard"][k] = v
+    # remove empty keys
+    split = {k: v for k, v in split.items() if v}
+    for k, v in split.items():
+        split[k] = freeze(unflatten_dict(v))
+    return split
+
+
+def unsplit_scanned_params(data):
+    flat = {}
+    for k in data.keys():
+        flat.update(flatten_dict(unfreeze(data[k])))
+    return freeze(unflatten_dict(flat))
+
+
 assert jax.local_device_count() == 8
 
 
@@ -574,13 +598,11 @@ def main():
     model_metadata = model_args.get_metadata()
 
     # get PartitionSpec and shape for model params
-    params_spec = None
-    disc_params_spec = None
-    lpips_spec = None
-    if training_args.mp_devices > 1:
-        raise NotImplementedError("Model Parallelism not implemented yet")
     params_shape = freeze(model.params_shape_tree)
     disc_params_shape = freeze(disc_model.params_shape_tree)
+    params_spec = set_partitions(unfreeze(params_shape), model.config.use_scan)
+    disc_params_spec = jax.tree_util.tree_map(lambda _: PartitionSpec(None), disc_params_shape)
+    lpips_spec = None
 
     # Initialize our training
     rng = jax.random.PRNGKey(training_args.seed_model)
@@ -724,15 +746,25 @@ def main():
         disc_opt = _opt(disc_learning_rate_fn)
         update_fn = opt.update
         disc_update_fn = disc_opt.update
-        optimizer = opt.init(params_shape)
+
+        # for main optimizer, we need to allow scanned layers
+        optimizer = {}
+        opt_fn = {}
+        for k, p in split_scanned_params(params_shape).items():
+            if "scanned" in k:
+                # extract 1 layer
+                p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p)
+            optimizer[k] = opt.init(p)
+            opt_fn[k] = NamedTuple("opt_fn", pspec_fn=Any, shape_and_dtype_fn=Any)(
+                optimizer[k].pspec_fn, optimizer[k].shape_and_dtype_fn
+            )
+            optimizer[k] = optax.GradientTransformation(optimizer[k].init_fn, update_fn)
+
+        # separate optimizer for discriminator
         disc_optimizer = disc_opt.init(disc_params_shape)
-        opt_fn = NamedTuple("opt_fn", pspec_fn=Any, shape_and_dtype_fn=Any)(
-            optimizer.pspec_fn, optimizer.shape_and_dtype_fn
-        )
         disc_opt_fn = NamedTuple("opt_fn", pspec_fn=Any, shape_and_dtype_fn=Any)(
             disc_optimizer.pspec_fn, disc_optimizer.shape_and_dtype_fn
         )
-        optimizer = optax.GradientTransformation(optimizer.init_fn, update_fn)
         disc_optimizer = optax.GradientTransformation(disc_optimizer.init_fn, disc_update_fn)
 
     elif training_args.optim == "adam":
@@ -743,55 +775,77 @@ def main():
             eps=training_args.adam_epsilon,
             weight_decay=training_args.weight_decay,
         )
-        optimizer = _opt(learning_rate=learning_rate_fn)
+        optimizer = {k: _opt(learning_rate=learning_rate_fn) for k in split_scanned_params(params_shape)}
         disc_optimizer = _opt(learning_rate=disc_learning_rate_fn)
 
     # get PartitionSpec and shape of optimizer state
     def get_opt_state_spec_and_shape():
         # get opt_state shape without actual init
-        opt_state_shape = jax.eval_shape(optimizer.init, params_shape)
+        opt_state_shape = {}
+        for k, p in split_scanned_params(params_shape).items():
+            if "scanned" in k:
+                opt_state_shape[k] = jax.eval_shape(jax.vmap(optimizer[k].init), p)
+            else:
+                opt_state_shape[k] = jax.eval_shape(optimizer[k].init, p)
         disc_opt_state_shape = jax.eval_shape(disc_optimizer.init, disc_params_shape)
-        # get PartitionSpec
-        if training_args.optim == "adam":
 
-            def _opt_state_spec_per_leaf(x, spec):
-                if isinstance(x, FrozenDict):
-                    # variables with same structure as params
-                    return spec
-                else:
-                    # other variables such as count
-                    return None
+        # utility functions for Adam
+        def _adam_opt_state_spec_per_leaf(x, spec):
+            if isinstance(x, FrozenDict):
+                # variables with same structure as params
+                return spec
+            else:
+                # other variables such as count
+                return None
 
-            def pspec_fn(spec, shape):
-                return (
-                    None
-                    if spec is None
-                    else jax.tree_util.tree_map(
-                        partial(_opt_state_spec_per_leaf, spec=spec),
-                        shape,
-                        # return None spec for empty elements
-                        is_leaf=lambda x: isinstance(x, (FrozenDict, optax.EmptyState)),
-                    )
+        def _adam_pspec_fn(spec, shape):
+            return (
+                None
+                if spec is None
+                else jax.tree_util.tree_map(
+                    partial(_adam_opt_state_spec_per_leaf, spec=spec),
+                    shape,
+                    # return None spec for empty elements
+                    is_leaf=lambda x: isinstance(x, (FrozenDict, optax.EmptyState)),
                 )
-
-            opt_state_spec = pspec_fn(params_spec, opt_state_shape)
-            disc_opt_state_spec = pspec_fn(disc_params_spec, disc_opt_state_shape)
-
-        elif training_args.optim == "distributed_shampoo":
-            params_spec = jax.tree_util.tree_map(lambda x: PartitionSpec(None), params_shape)
-            opt_state_spec = opt_fn.pspec_fn(
-                params_shape,
-                params_spec,
-                statistics_partition_spec,
             )
-            disc_params_spec = jax.tree_util.tree_map(lambda x: PartitionSpec(None), disc_params_shape)
-            disc_opt_state_spec = disc_opt_fn.pspec_fn(
-                disc_params_shape,
-                disc_params_spec,
-                statistics_partition_spec,
+
+        # get PartitionSpec
+        split_spec = split_scanned_params(params_spec)
+        opt_state_spec = {}
+
+        def _get_spec(**kwargs):
+            """Get optimizer spec for a certain model portion"""
+            if training_args.optim == "adam":
+                return _adam_pspec_fn(kwargs["params_spec"], kwargs["opt_state_shape"])
+            elif training_args.optim == "distributed_shampoo":
+                return kwargs["opt_fn"].pspec_fn(
+                    kwargs["params_shape"],
+                    kwargs["params_spec"],
+                    statistics_partition_spec,
+                )
+            else:
+                raise NotImplementedError
+
+        # get spec for model optimizer
+        for k, p in split_scanned_params(params_shape).items():
+            if "scanned" in k:
+                # extract 1 layer
+                p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p)
+            _opt_fn = opt_fn[k] if training_args.optim == "distributed_shampoo" else None
+            opt_state_spec[k] = _get_spec(
+                params_spec=split_spec[k],
+                opt_state_shape=opt_state_shape[k],
+                opt_fn=_opt_fn,
+                params_shape=p,
             )
-        else:
-            raise NotImplementedError
+        #  get spec for discriminator
+        disc_opt_state_spec = _get_spec(
+            params_spec=disc_params_spec,
+            opt_state_shape=disc_opt_state_shape,
+            opt_fn=disc_opt_fn if training_args.optim == "distributed_shampoo" else None,
+            params_shape=disc_params_shape,
+        )
         return (
             opt_state_spec,
             opt_state_shape,
@@ -825,8 +879,20 @@ def main():
         train_samples: int = 0  # number of samples seen
 
         def apply_gradients(self, *, grads, disc_grads, **kwargs):
-            updates, new_opt_state = optimizer.update(grads, self.opt_state, self.params)
-            new_params = optax.apply_updates(self.params, updates)
+            # apply gradients to model parameters
+            grads = split_scanned_params(grads)
+            params = split_scanned_params(self.params)
+            new_opt_state = {}
+            new_params = {}
+            for k, param in params.items():
+                update_fn = optimizer[k].update
+                if "scanned" in k:
+                    update_fn = jax.vmap(update_fn, in_axes=(0, 0, 0), out_axes=(0, 0))
+                updates, new_opt_state[k] = update_fn(grads[k], self.opt_state[k], param)
+                new_params[k] = optax.apply_updates(param, updates)
+            new_params = unsplit_scanned_params(new_params)
+
+            # apply gradients to discriminator
             disc_updates, new_disc_opt_state = disc_optimizer.update(disc_grads, self.disc_opt_state, self.disc_params)
             new_disc_params = optax.apply_updates(self.disc_params, disc_updates)
             return self.replace(
@@ -840,7 +906,12 @@ def main():
 
         @classmethod
         def create(cls, *, params, disc_params, lpips_params, **kwargs):
-            opt_state = optimizer.init(params)
+            opt_state = {}
+            for k, p in split_scanned_params(params).items():
+                init_fn = optimizer[k].init
+                if "scanned" in k:
+                    init_fn = jax.vmap(init_fn)
+                opt_state[k] = init_fn(p)
             disc_opt_state = disc_optimizer.init(disc_params)
             return cls(
                 step=0,
