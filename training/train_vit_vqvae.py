@@ -970,8 +970,8 @@ def main():
         predicted_images, (q_latent_loss, e_latent_loss) = model_fn(
             minibatch, params=params, dropout_rng=dropout_rng, train=train
         )
-        disc_fake_scores = disc_model_fn(predicted_images, params=disc_params, dropout_rng=dropout_rng, train=train)
-        loss_disc = jnp.mean(nn.softplus(-disc_fake_scores))
+        # disc_fake_scores = disc_model_fn(predicted_images, params=disc_params, dropout_rng=dropout_rng, train=train)
+        # loss_disc = jnp.mean(nn.softplus(-disc_fake_scores))
         # TODO: replace l1 with logit laplace (only if necessary)
         loss_l1 = jnp.mean(jnp.abs(predicted_images - minibatch))
         loss_l2 = jnp.mean((predicted_images - minibatch) ** 2)
@@ -983,7 +983,7 @@ def main():
             + model.config.cost_q_latent * q_latent_loss
             + model.config.cost_e_latent * e_latent_loss
             + model.config.cost_lpips * loss_lpips
-            + model.config.cost_stylegan * loss_disc
+            #    + model.config.cost_stylegan * loss_disc
         )
         loss_details = {
             "loss_l1": model.config.cost_l1 * loss_l1,
@@ -991,11 +991,12 @@ def main():
             "loss_q_latent": model.config.cost_q_latent * q_latent_loss,
             "loss_e_latent": model.config.cost_e_latent * e_latent_loss,
             "loss_lpips": model.config.cost_lpips * loss_lpips,
-            "loss_stylegan": model.config.cost_stylegan * loss_disc,
+            #    "loss_stylegan": model.config.cost_stylegan * loss_disc,
         }
         return loss, (loss_details, predicted_images)
 
     def compute_stylegan_loss(disc_params, minibatch, predicted_images, dropout_rng, disc_model_fn, train):
+        return 0.0, {"disc_loss": 0.0}
         disc_fake_scores = disc_model_fn(predicted_images, params=disc_params, dropout_rng=dropout_rng, train=train)
         disc_real_scores = disc_model_fn(minibatch, params=disc_params, dropout_rng=dropout_rng, train=train)
         disc_loss_stylegan = jnp.mean(nn.softplus(disc_fake_scores) + nn.softplus(-disc_real_scores))
@@ -1320,7 +1321,9 @@ def main():
         donate_argnums=(0,),
     )
     # get errors
-    p_train_step = checkify.checkify(p_train_step, errors=checkify.all_checks)
+    debug = False
+    if debug:
+        p_train_step = checkify.checkify(p_train_step, errors=checkify.all_checks)
 
     p_eval_step = pjit(
         eval_step,
@@ -1610,8 +1613,11 @@ def main():
                     )
 
                     # train step
-                    errors, (state, train_metrics) = p_train_step(state, batch, train_time)
-                    errors.throw()
+                    if debug:
+                        errors, (state, train_metrics) = p_train_step(state, batch, train_time)
+                        errors.throw()
+                    else:
+                        state, train_metrics = p_train_step(state, batch, train_time)
                     local_state["step"] += 1
                     local_state["train_time"] = train_time
                     local_state["train_samples"] += training_args.batch_size_per_step
