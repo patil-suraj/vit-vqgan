@@ -202,7 +202,7 @@ class TrainingArguments:
     )
 
     use_vmap_trick: bool = field(
-        default=True,
+        default=False,
         metadata={"help": "Optimization trick that should lead to faster training."},
     )
 
@@ -574,6 +574,7 @@ def main():
     model_metadata = model_args.get_metadata()
 
     # get PartitionSpec and shape for model params
+    # For this example we just use None for all models for simplification and use tiny models with data parallelism only
     params_spec = None
     disc_params_spec = None
     lpips_spec = None
@@ -778,13 +779,11 @@ def main():
             disc_opt_state_spec = pspec_fn(disc_params_spec, disc_opt_state_shape)
 
         elif training_args.optim == "distributed_shampoo":
-            params_spec = jax.tree_util.tree_map(lambda x: PartitionSpec(None), params_shape)
             opt_state_spec = opt_fn.pspec_fn(
                 params_shape,
                 params_spec,
                 statistics_partition_spec,
             )
-            disc_params_spec = jax.tree_util.tree_map(lambda x: PartitionSpec(None), disc_params_shape)
             disc_opt_state_spec = disc_opt_fn.pspec_fn(
                 disc_params_shape,
                 disc_params_spec,
