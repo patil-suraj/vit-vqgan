@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import jaxlib
 import numpy as np
 import optax
+import tensorflow as tf
 import transformers
 import wandb
 from flax import core, struct
@@ -38,6 +39,8 @@ from vit_vqgan import (StyleGANDiscriminator, StyleGANDiscriminatorConfig,
 from vit_vqgan.data import Dataset, logits_to_image
 
 logger = logging.getLogger(__name__)
+
+tf.config.experimental.set_visible_devices([], "GPU")
 
 cc.initialize_cache("jax_cache")
 
