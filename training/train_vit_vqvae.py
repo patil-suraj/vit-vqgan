@@ -23,7 +23,7 @@ from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.serialization import from_bytes, to_bytes
 from flax.traverse_util import flatten_dict
 from huggingface_hub import Repository
-from jax.experimental import PartitionSpec, maps
+from jax.experimental import PartitionSpec, checkify, maps
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
 from lpips_j.lpips import LPIPS
@@ -1319,6 +1319,9 @@ def main():
         out_axis_resources=(state_spec, None),
         donate_argnums=(0,),
     )
+    # get errors
+    p_train_step = checkify.checkify(p_train_step, errors=checkify.all_checks)
+
     p_eval_step = pjit(
         eval_step,
         in_axis_resources=(state_spec, batch_spec),
@@ -1607,7 +1610,8 @@ def main():
                     )
 
                     # train step
-                    state, train_metrics = p_train_step(state, batch, train_time)
+                    errors, (state, train_metrics) = p_train_step(state, batch, train_time)
+                    errors.throw()
                     local_state["step"] += 1
                     local_state["train_time"] = train_time
                     local_state["train_samples"] += training_args.batch_size_per_step
