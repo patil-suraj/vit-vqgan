@@ -9,7 +9,7 @@
   "cost_stylegan": 0.005,
   "cost_gradient_penalty": 1e8,
   "dropout": 0.0,
-  "gradient_checkpointing": true,
+  "gradient_checkpointing": false,
   "hidden_act": "gelu",
   "hidden_size": 768,
   "image_size": 256,
@@ -28,5 +28,5 @@
   "use_bias": false,
   "use_conv_patches": true,
   "use_glu": true,
-  "use_scan": true
+  "use_scan": false
 }
