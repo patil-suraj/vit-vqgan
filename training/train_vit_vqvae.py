@@ -557,6 +557,7 @@ def main():
             dtype=getattr(jnp, model_args.dtype),
             _do_init=False,  # we overwrite them with loaded checkpoint
         )
+        params = freeze(params)
     else:
         model = ViTVQModel(
             config,
