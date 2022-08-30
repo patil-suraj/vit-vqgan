@@ -596,6 +596,10 @@ def main():
     )
 
     # overwrite certain config parameters
+    if config is not None:
+        model.config = config
+    if disc_config is not None:
+        disc_model.disc_config = disc_config
     model.config.gradient_checkpointing = training_args.gradient_checkpointing
     disc_model.config.gradient_checkpointing = training_args.gradient_checkpointing
 
