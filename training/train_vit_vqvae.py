@@ -598,17 +598,6 @@ def main():
     # overwrite certain config parameters
     model.config.gradient_checkpointing = training_args.gradient_checkpointing
     disc_model.config.gradient_checkpointing = training_args.gradient_checkpointing
-    if config is not None:
-        for k in [
-            "cost_l1",
-            "cost_l2",
-            "cost_q_latent",
-            "cost_e_latent",
-            "cost_lpips",
-            "cost_stylegan",
-            "cost_gradient_penalty",
-        ]:
-            setattr(model, k, getattr(config, k))
     # get model metadata
     model_metadata = model_args.get_metadata()
 
