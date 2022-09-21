@@ -4,6 +4,8 @@ from typing import Tuple
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+import numpy as np
+from einops import rearrange, repeat
 from flax.core.frozen_dict import FrozenDict, unfreeze
 from flax.linen import partitioning as nn_partitioning
 from flax.linen.attention import dot_product_attention_weights
@@ -33,6 +35,32 @@ def l2_normalize(x, axis=None, eps=1e-12):
       An array of the same shape as 'x' L2-normalized along 'axis'.
     """
     return x * jax.lax.rsqrt((x * x).sum(axis=axis, keepdims=True) + eps)
+
+
+# Source: https://github.com/huggingface/transformers/blob/main/src/transformers/models/gptj/modeling_flax_gptj.py
+def create_sinusoidal_positions(num_pos, dim):
+    inv_freq = 1.0 / (10000 ** (np.arange(0, dim, 2) / dim))
+    sinusoid_inp = np.einsum("i , j -> i j", np.arange(num_pos), inv_freq).astype("float32")
+    sin, cos = np.sin(sinusoid_inp), np.cos(sinusoid_inp)
+    sentinel = dim // 2 + dim % 2
+    out = np.zeros((num_pos, dim))
+    out[:, 0:sentinel] = sin
+    out[:, sentinel:] = cos
+    return jnp.array(out)
+
+
+# Source: https://blog.eleuther.ai/rotary-embeddings/
+def rotate_every_two(x):
+    x1 = x[:, :, :, ::2]
+    x2 = x[:, :, :, 1::2]
+    x = jnp.stack((-x2, x1), axis=-1)
+    return rearrange(x, "... d j -> ... (d j)")
+
+
+# Source: https://blog.eleuther.ai/rotary-embeddings/
+def apply_rotary_pos_emb(x, sincos):
+    sin, cos = map(lambda t: repeat(t, "b n -> b (n j)", j=2)[:, None, :], sincos)
+    return (x * cos) + (rotate_every_two(x) * sin)
 
 
 # We could simply use einops for this, but I'm a little crazy.
@@ -226,6 +254,10 @@ class Attention(nn.Module):
         self.q_proj, self.k_proj, self.v_proj = Dense(), Dense(), Dense()
         self.out_proj = Dense()
 
+        if self.config.use_rope:
+            num_patches = (self.config.image_size // self.config.patch_size) ** 2
+            self.embed_positions = create_sinusoidal_positions(num_patches, self.head_dim)
+
         if self.config.post_attention_conv:
             # suggestion from Phil Wang
             self.post_attn_conv = nn.Conv(
@@ -257,6 +289,11 @@ class Attention(nn.Module):
         dropout_rng = None
         if not deterministic and self.dropout > 0.0:
             dropout_rng = self.make_rng("dropout")
+
+        if self.config.use_rope:
+            sincos = jnp.split(self.embed_positions, 2, axis=-1)
+            key = apply_rotary_pos_emb(key, sincos)
+            query = apply_rotary_pos_emb(query, sincos)
 
         attn_weights = dot_product_attention_weights(
             query,
@@ -364,12 +401,13 @@ class VitEncoder(nn.Module):
         assert hidden_states.ndim == 3
 
         num_patches = (self.config.image_size // self.config.patch_size) ** 2
-        position_embeddings = self.param(
-            "pos_embedding",
-            jax.nn.initializers.normal(self.config.initializer_range, dtype=jnp.float32),
-            (1, num_patches, self.config.hidden_size),
-        )
-        hidden_states += position_embeddings
+        if self.config.use_absolute_pos:
+            position_embeddings = self.param(
+                "pos_embedding",
+                jax.nn.initializers.normal(self.config.initializer_range, dtype=jnp.float32),
+                (1, num_patches, self.config.hidden_size),
+            )
+            hidden_states += position_embeddings
 
         hidden_states = nn.Dropout(rate=self.config.dropout)(hidden_states, deterministic=deterministic)
         hidden_states = Transformer(self.config.num_encoder_layers, self.config, dtype=self.dtype)(
@@ -386,12 +424,13 @@ class VitDecoder(nn.Module):
     def __call__(self, hidden_states, deterministic: bool = True):
         assert hidden_states.ndim == 3
         num_patches = (self.config.image_size // self.config.patch_size) ** 2
-        position_embeddings = self.param(
-            "pos_embedding",
-            jax.nn.initializers.normal(self.config.initializer_range, dtype=jnp.float32),
-            (1, num_patches, self.config.hidden_size),
-        )
-        hidden_states += position_embeddings
+        if self.config.use_absolute_pos:
+            position_embeddings = self.param(
+                "pos_embedding",
+                jax.nn.initializers.normal(self.config.initializer_range, dtype=jnp.float32),
+                (1, num_patches, self.config.hidden_size),
+            )
+            hidden_states += position_embeddings
         hidden_states = Transformer(self.config.num_decoder_layers, self.config, dtype=self.dtype)(
             hidden_states, deterministic=deterministic
         )

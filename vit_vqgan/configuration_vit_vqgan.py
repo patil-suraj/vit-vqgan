@@ -38,6 +38,8 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         initializer_range=0.02,
         use_bias=False,
         ln_positions="preln",  # preln, normformer
+        use_rope=False,
+        use_absolute_pos=True,
         gradient_checkpointing=False,
         use_scan=None,
         **kwargs
@@ -72,5 +74,7 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         self.hidden_act = hidden_act
         self.use_bias = use_bias
         self.ln_positions = ln_positions
+        self.use_rope = use_rope
+        self.use_absolute_pos = use_absolute_pos
         self.gradient_checkpointing = gradient_checkpointing
         self.use_scan = use_scan
