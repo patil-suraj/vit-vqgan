@@ -96,7 +96,7 @@ class ConvDownsample2D(nn.Module):
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(),
         )
-        self.resample_kernel_ = jnp.array(resample_kernel) * self.gain / resample_kernel.sum()
+        self.resample_kernel_ = (jnp.array(resample_kernel) * self.gain / resample_kernel.sum()).astype(jnp.float32)
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         # pylint: disable=invalid-name
@@ -152,10 +152,10 @@ def minibatch_stddev_layer(
     group_size = min(group_size, N) if group_size is not None else N
     C_ = C // num_new_features
 
-    y = jnp.reshape(x, (group_size, -1, H, W, num_new_features, C_))
+    y = jnp.reshape(x, (-1, group_size, H, W, num_new_features, C_))
 
-    y_centered = y - jnp.mean(y, axis=0, keepdims=True)
-    y_std = jnp.sqrt(jnp.mean(y_centered * y_centered, axis=0) + 1e-8)
+    y_centered = y - jnp.mean(y, axis=1, keepdims=True)
+    y_std = jnp.sqrt(jnp.mean(y_centered * y_centered, axis=1) + 1e-8)
 
     y_std = jnp.mean(y_std, axis=(1, 2, 4))
     y_std = y_std.reshape((-1, 1, 1, num_new_features))
@@ -179,7 +179,7 @@ class DiscriminatorBlock(nn.Module):
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(),
         )
-        self.downsampl1 = ConvDownsample2D(
+        self.downsample1 = ConvDownsample2D(
             self.out_features,
             kernel_shape=3,
             resample_kernel=self.resample_kernel,
@@ -197,7 +197,7 @@ class DiscriminatorBlock(nn.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         y = self.conv_in(x)
         y = self.activation_function(y)
-        y = self.downsampl1(y)
+        y = self.downsample1(y)
         y = self.activation_function(y)
 
         residual = self.downsample2(x)

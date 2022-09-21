@@ -40,7 +40,12 @@ class QuantizedValue:
             return QuantizedValue([], [], [], quantized_dtype, extract_diagonal, [])
         quantized, diagonal_fvalue, bucket_size = QuantizedValue.quantize(fvalue, quantized_dtype, extract_diagonal)
         return QuantizedValue(
-            quantized, diagonal_fvalue, bucket_size, quantized_dtype, extract_diagonal, list(quantized.shape)
+            quantized,
+            diagonal_fvalue,
+            bucket_size,
+            quantized_dtype,
+            extract_diagonal,
+            list(quantized.shape),
         )
 
     # Quantization is from Lingvo JAX optimizers.

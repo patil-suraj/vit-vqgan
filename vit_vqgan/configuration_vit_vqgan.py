@@ -41,6 +41,7 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         use_rope=False,
         use_absolute_pos=True,
         gradient_checkpointing=False,
+        use_scan=None,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -76,3 +77,4 @@ class ViTVQConfig(PretrainedFromWandbMixin, PretrainedConfig):
         self.use_rope = use_rope
         self.use_absolute_pos = use_absolute_pos
         self.gradient_checkpointing = gradient_checkpointing
+        self.use_scan = use_scan
